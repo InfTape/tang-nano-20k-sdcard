@@ -1,0 +1,24 @@
+--- a/components/usb/cherryusb/class/msc/usbd_msc.c
++++ b/components/usb/cherryusb/class/msc/usbd_msc.c
+@@ -457,6 +457,10 @@ static bool SCSI_readFormatCapacity(uint8_t busid, uint8_t **data, uint32_t *len
+         SCSI_SetSenseData(busid, SCSI_KCQIR_INVALIDCOMMAND);
+         return false;
+     }
++    /* Refresh backend geometry for removable or late-ready media. */
++    usbd_msc_get_cap(busid, g_usbd_msc[busid].cbw.bLUN,
++                     &g_usbd_msc[busid].scsi_blk_nbr[g_usbd_msc[busid].cbw.bLUN],
++                     &g_usbd_msc[busid].scsi_blk_size[g_usbd_msc[busid].cbw.bLUN]);
+     uint8_t format_capacity[SCSIRESP_READFORMATCAPACITIES_SIZEOF] = {
+         0x00,
+         0x00,
+@@ -487,6 +491,10 @@ static bool SCSI_readCapacity10(uint8_t busid, uint8_t **data, uint32_t *len)
+         return false;
+     }
+ 
++    /* Refresh backend geometry for removable or late-ready media. */
++    usbd_msc_get_cap(busid, g_usbd_msc[busid].cbw.bLUN,
++                     &g_usbd_msc[busid].scsi_blk_nbr[g_usbd_msc[busid].cbw.bLUN],
++                     &g_usbd_msc[busid].scsi_blk_size[g_usbd_msc[busid].cbw.bLUN]);
+     uint8_t capacity10[SCSIRESP_READCAPACITY10_SIZEOF] = {
+         (uint8_t)(((g_usbd_msc[busid].scsi_blk_nbr[g_usbd_msc[busid].cbw.bLUN] - 1) >> 24) & 0xff),
+         (uint8_t)(((g_usbd_msc[busid].scsi_blk_nbr[g_usbd_msc[busid].cbw.bLUN] - 1) >> 16) & 0xff),
