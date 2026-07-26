@@ -10,6 +10,7 @@ interface over the board's existing USB connector.
 - SDHC/SDXC initialization at a 24 MHz SD clock
 - Native 4-bit reads with per-lane CRC16
 - Up to 32 sectors (16 KiB) per private-link read
+- CMD17 single-block reads and CMD18/CMD12 multi-block reads
 - Native 4-bit write datapath with CMD24 and CMD25 (disabled in the current
   read-only validation image)
 - Up to eight sectors (4 KiB) per multi-block write when enabled
@@ -36,14 +37,16 @@ Hardware: Tang Nano 20K v3923, 125 GB SDXC card, Windows, exFAT.
 | 4 MiB no-buffering read with 4 MHz hardware SPI | 265.17–289.75 KiB/s |
 | 4 MiB buffered write with 4 MHz hardware SPI | 255.62 KiB/s |
 | 3.04 MiB no-buffering read with 6 MHz SPI and 16 KiB batches | 466.13-468.08 KiB/s |
+| 3.04 MiB no-buffering read with 6 MHz SPI and CMD18 | 555.48-557.05 KiB/s |
 
-The current read-only validation configuration averages 467.34 KiB/s for
-repeated unbuffered reads, about 10.4 times the original read speed. It uses
+The current read-only validation configuration averages 556.51 KiB/s for
+repeated unbuffered reads, about 12.4 times the original read speed. It uses
 BL616 SPI0 in polling mode with software-controlled chip select; DMA is
-deliberately not enabled. The FPGA still issues one CMD17 per sector while
-collecting up to 32 sequential sectors in a 16 KiB buffer. CMD18 and actual
-SD/SPI/USB overlap remain future optimization work. A 10 MHz hardware test
-returned inconsistent read data, so 6 MHz is the validated limit.
+deliberately not enabled. Single-block reads use CMD17; multi-block reads use
+one CMD18 followed by CMD12 while collecting up to 32 sectors in a 16 KiB
+buffer. Actual SD/SPI/USB overlap remains future optimization work. A 10 MHz
+hardware test returned inconsistent read data, so 6 MHz is the validated
+limit.
 
 See [Performance notes](docs/PERFORMANCE.md) for benchmark commands, tested
 configurations, and current limits.

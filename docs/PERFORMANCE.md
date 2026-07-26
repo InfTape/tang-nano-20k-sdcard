@@ -11,6 +11,7 @@
 - FPGA private-link frontend: SCLK clock domain, mode 0
 - Transfer batch: up to 32 512-byte sectors (16 KiB)
 - Read buffering: two 16 KiB dual-clock banks
+- SD reads: CMD17 for one block, CMD18 plus CMD12 for multiple blocks
 - FPGA writes disabled during high-speed read validation
 
 ## Measured results
@@ -22,12 +23,14 @@
 | 4 KiB batched 4 MHz hardware SPI link | 265.17–289.75 KiB/s | 255.62 KiB/s |
 | 16 KiB batched 4 MHz SCLK-domain link | 349.15-350.17 KiB/s steady | not tested |
 | 16 KiB batched 6 MHz SCLK-domain link | 466.13-468.08 KiB/s | disabled |
+| 16 KiB batched 6 MHz link with CMD18 | 555.48-557.05 KiB/s | disabled |
 
-The validated 6 MHz result averaged 467.34 KiB/s across three unbuffered reads
-of the 3,190,784-byte aligned prefix of an existing file. This is about 68
-percent above the previous 277.46 KiB/s average and about 10.4 times the
-original read speed. The older results used a disposable aligned 4 MiB file,
-so the two generations are not a perfectly identical benchmark.
+The validated 6 MHz CMD18 result averaged 556.51 KiB/s across three unbuffered
+reads of the 3,190,784-byte aligned prefix of an existing file. CMD18 improved
+the same 6 MHz path by about 19 percent over its 467.34 KiB/s CMD17 result. It
+is about twice the previous 277.46 KiB/s stable average and about 12.4 times
+the original read speed. The older results used a disposable aligned 4 MiB
+file, so the generations are not a perfectly identical benchmark.
 
 Writes are intentionally rejected by the current FPGA image while high-speed
 read correctness is being established. The older 4 MHz image completed a
@@ -56,11 +59,11 @@ timing changes.
 
 ## Current limits
 
-The FPGA still performs batched reads as consecutive CMD17 operations. It does
-not yet use CMD18 multi-block read. The two read banks and ownership state
-machine are present, but the protocol still finishes the SD read before the
-host retrieves that batch. SD access, SPI return, and USB service are not yet
-fully overlapped.
+Single-block reads use CMD17. Multi-block reads issue one CMD18, receive up to
+32 consecutive sectors with per-lane CRC16, then issue CMD12 and wait for DAT0
+to leave busy. The two read banks and ownership state machine are present, but
+the protocol still finishes the SD read before the host retrieves that batch.
+SD access, SPI return, and USB service are not yet fully overlapped.
 
 The SPI shift logic now runs directly in the SCLK domain. Only request
 descriptors, response descriptors, bank selection, and ownership state cross
@@ -81,10 +84,9 @@ a consistently managed DMA path.
 
 ## Next optimization order
 
-1. Diagnose the 10 MHz signal/timing boundary and optionally characterize an
-   intermediate 8 MHz setting.
-2. Replace repeated CMD17 reads with CMD18 plus CMD12 termination.
-3. Schedule the second buffer as an actual prefetch target so SD reads,
+1. Schedule the second buffer as an actual prefetch target so SD reads,
    private-link return, and USB service overlap.
-4. Remove or coalesce private-link status exchanges.
-5. Re-evaluate DMA only after the polling transport is stable above 6 MHz.
+2. Diagnose the 10 MHz signal/timing boundary and optionally characterize an
+   intermediate 8 MHz setting.
+3. Remove or coalesce private-link status exchanges.
+4. Re-evaluate DMA only after the polling transport is stable above 6 MHz.

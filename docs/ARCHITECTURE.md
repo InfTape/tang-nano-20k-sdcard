@@ -23,13 +23,13 @@ The FPGA runs from a 48 MHz system clock and generates a 24 MHz SD clock.
 Initialization uses CMD0, CMD8, ACMD41, CMD2, CMD3, CMD9, CMD7, ACMD6, and
 CMD16 where applicable. The card must be SDHC or SDXC.
 
-Each read sector currently uses CMD17, but the FPGA collects up to 32
-sequential sectors in a 16 KiB buffer before returning one BL616-link response.
-Writes use CMD24 for one sector and `CMD55 -> ACMD23 -> CMD25 -> CMD12` for
-batches of two to eight sectors. Each SD lane has an independent CRC16. The
-BL616/FPGA transport uses CRC32 for payloads. The current high-speed validation
-image sets `ALLOW_WRITES=0`, so write requests are rejected before reaching the
-SD controller.
+Single-block reads use CMD17. Multi-block reads issue one CMD18, collect up to
+32 sequential sectors in a 16 KiB buffer, then issue CMD12 and wait for DAT0
+to leave busy before returning the batch. Writes use CMD24 for one sector and
+`CMD55 -> ACMD23 -> CMD25 -> CMD12` for batches of two to eight sectors. Each
+SD lane has an independent CRC16. The BL616/FPGA transport uses CRC32 for
+payloads. The current high-speed validation image sets `ALLOW_WRITES=0`, so
+write requests are rejected before reaching the SD controller.
 
 The BL616 drives SCLK, MOSI, and MISO with hardware SPI0 in mode 0. GPIO0
 remains a software-controlled chip select so it stays asserted across the
