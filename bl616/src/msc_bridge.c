@@ -18,7 +18,7 @@
 static struct usbd_interface msc_interface;
 static volatile uint32_t cached_blocks = FALLBACK_BLOCKS;
 static volatile bool backend_ready;
-static uint8_t probe_sector[512] __attribute__((aligned(4)));
+static uint8_t probe_blocks[4096] __attribute__((aligned(4)));
 
 void msc_bridge_probe_task(void *argument)
 {
@@ -27,12 +27,8 @@ void msc_bridge_probe_task(void *argument)
 
     for (;;) {
         if (fpga_link_get_capacity(&blocks) == 0 && blocks != 0) {
-            int result = 0;
-            for (uint32_t sector = 0; sector < 8; sector++) {
-                result = fpga_link_read_sector(sector, probe_sector);
-                if (result != 0)
-                    break;
-            }
+            uint8_t probe_count = blocks >= 8 ? 8 : (uint8_t)blocks;
+            int result = fpga_link_read_blocks(0, probe_blocks, probe_count);
             if (result == 0) {
                 cached_blocks = blocks;
                 backend_ready = true;
@@ -91,12 +87,19 @@ int usbd_msc_sector_read(uint8_t busid, uint8_t lun, uint32_t sector,
         return 0;
     }
 
-    for (uint32_t offset = 0; offset < length; offset += 512, sector++) {
-        if (sector >= cached_blocks)
+    for (uint32_t offset = 0; offset < length;) {
+        uint32_t remaining_blocks = (length - offset) / 512u;
+        uint8_t block_count = remaining_blocks > 8u ?
+            8u : (uint8_t)remaining_blocks;
+        uint32_t transfer_length = (uint32_t)block_count * 512u;
+        if (sector >= cached_blocks ||
+            block_count > cached_blocks - sector)
             return -1;
-        if (fpga_link_read_sector(sector, buffer + offset) != 0) {
-            memset(buffer + offset, 0, 512);
-        }
+        if (fpga_link_read_blocks(sector, buffer + offset,
+                                  block_count) != 0)
+            memset(buffer + offset, 0, transfer_length);
+        offset += transfer_length;
+        sector += block_count;
     }
     return 0;
 }
@@ -112,7 +115,8 @@ int usbd_msc_sector_write(uint8_t busid, uint8_t lun, uint32_t sector,
         uint32_t remaining_blocks = (length - offset) / 512u;
         uint8_t block_count = remaining_blocks > 8u ?
             8u : (uint8_t)remaining_blocks;
-        if (sector + block_count > cached_blocks ||
+        if (sector >= cached_blocks ||
+            block_count > cached_blocks - sector ||
             fpga_link_write_blocks(sector, buffer + offset,
                                    block_count) != 0)
             return -1;

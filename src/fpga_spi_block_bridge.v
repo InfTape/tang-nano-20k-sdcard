@@ -25,7 +25,7 @@ module fpga_spi_block_bridge (
     output reg  [31:0] request_lba,
     output reg  [3:0]  request_block_count,
 
-    output wire [8:0]  buffer_addr,
+    output wire [11:0] buffer_addr,
     input  wire [7:0]  buffer_rdata,
     input  wire [11:0] write_buffer_addr,
     output reg  [7:0]  write_buffer_data,
@@ -108,15 +108,15 @@ module fpga_spi_block_bridge (
     reg [1:0] response_payload_kind;
     reg [31:0] response_crc_work;
     reg [31:0] response_crc;
-    reg [7:0] response_buffer [0:511];
     reg [15:0] scan_index;
     reg scan_active;
-    reg scan_phase;
+    reg [1:0] scan_phase;
     reg [7:0] scan_data_reg;
     reg response_ready;
     reg [5:0] turnaround_count;
-    reg [8:0] buffer_addr_reg;
+    reg [11:0] buffer_addr_reg;
     reg [7:0] request_buffer [0:4095];
+    reg [15:0] read_data_length;
 
     reg tx_active;
     reg [2:0] tx_bit_count;
@@ -126,8 +126,9 @@ module fpga_spi_block_bridge (
         tx_active && tx_byte_index >= 16'd7 &&
         tx_byte_index < (16'd7 + response_length);
     wire [15:0] tx_payload_index = tx_byte_index - 16'd7;
-    assign buffer_addr = scan_active ?
-        scan_index[8:0] : buffer_addr_reg;
+    assign buffer_addr = scan_active ? scan_index[11:0] :
+        (tx_payload_phase && response_payload_kind == PAYLOAD_BLOCK) ?
+            tx_payload_index[11:0] : buffer_addr_reg;
 
     function [7:0] generated_payload_byte;
         input [1:0] kind;
@@ -204,7 +205,7 @@ module fpga_spi_block_bridge (
 
     wire [7:0] current_tx_byte =
         tx_payload_phase && response_payload_kind == PAYLOAD_BLOCK ?
-            response_buffer[tx_payload_index[8:0]] :
+            buffer_rdata :
             response_byte(tx_byte_index);
     assign spi_miso = (cs_active && tx_active) ?
         current_tx_byte[3'd7 - tx_bit_count] : 1'b1;
@@ -220,8 +221,8 @@ module fpga_spi_block_bridge (
             response_crc_work <= 32'hffff_ffff;
             response_crc <= 32'd0;
             scan_index <= 16'd0;
-            scan_phase <= 1'b0;
-            buffer_addr_reg <= 9'd0;
+            scan_phase <= 2'd0;
+            buffer_addr_reg <= 12'd0;
             if (length_value == 0) begin
                 scan_active <= 1'b0;
                 response_ready <= 1'b0;
@@ -263,22 +264,35 @@ module fpga_spi_block_bridge (
                                        PAYLOAD_STATUS);
                 end
                 CMD_READ_START: begin
-                    if (!card_ready)
+                    if (request_length != 0 &&
+                        (request_length < 16'd512 ||
+                         request_length > 16'd4096 ||
+                         request_length[8:0] != 9'd0))
+                        start_response(STATUS_BAD_REQUEST, 0, PAYLOAD_NONE);
+                    else if (!card_ready)
                         start_response(STATUS_NOT_READY, 0, PAYLOAD_NONE);
                     else if (card_error)
                         start_response(STATUS_IO_ERROR, 0, PAYLOAD_NONE);
                     else if (card_busy)
                         start_response(STATUS_BUSY, 0, PAYLOAD_NONE);
-                    else if (request_lba >= capacity_blocks)
+                    else if (request_lba >= capacity_blocks ||
+                             (request_length == 0 ? 32'd1 :
+                              {28'd0, request_length[12:9]}) >
+                                 capacity_blocks - request_lba)
                         start_response(STATUS_BAD_REQUEST, 0, PAYLOAD_NONE);
                     else begin
+                        request_block_count <= request_length == 0 ?
+                            4'd1 : request_length[12:9];
+                        read_data_length <= request_length == 0 ?
+                            16'd512 : request_length;
                         read_request <= 1'b1;
                         start_response(STATUS_OK, 0, PAYLOAD_NONE);
                     end
                 end
                 CMD_READ_DATA: begin
                     if (card_read_ready)
-                        start_response(STATUS_OK, 16'd512, PAYLOAD_BLOCK);
+                        start_response(STATUS_OK, read_data_length,
+                                       PAYLOAD_BLOCK);
                     else if (card_busy)
                         start_response(STATUS_BUSY, 0, PAYLOAD_NONE);
                     else
@@ -306,6 +320,7 @@ module fpga_spi_block_bridge (
             request_lba <= 32'd0;
             request_block_count <= 4'd1;
             request_length <= 16'd0;
+            read_data_length <= 16'd512;
             payload_count <= 16'd0;
             payload_crc_count <= 2'd0;
             request_crc_work <= 32'hffff_ffff;
@@ -317,11 +332,11 @@ module fpga_spi_block_bridge (
             response_crc <= 32'd0;
             scan_index <= 16'd0;
             scan_active <= 1'b0;
-            scan_phase <= 1'b0;
+            scan_phase <= 2'd0;
             scan_data_reg <= 8'd0;
             response_ready <= 1'b0;
             turnaround_count <= 6'd0;
-            buffer_addr_reg <= 9'd0;
+            buffer_addr_reg <= 12'd0;
             write_buffer_data <= 8'd0;
             tx_active <= 1'b0;
             tx_bit_count <= 3'd0;
@@ -343,7 +358,7 @@ module fpga_spi_block_bridge (
                 request_crc_work <= 32'hffff_ffff;
                 request_crc_received <= 32'd0;
                 scan_active <= 1'b0;
-                scan_phase <= 1'b0;
+                scan_phase <= 2'd0;
                 response_ready <= 1'b0;
                 turnaround_count <= 6'd0;
                 tx_active <= 1'b0;
@@ -384,6 +399,14 @@ module fpga_spi_block_bridge (
                                         start_response(STATUS_CRC_ERROR, 0,
                                                        PAYLOAD_NONE);
                                     end else if (request_length == 0) begin
+                                        rx_state <= RX_DISCARD;
+                                        debug_request_seen <= 1'b1;
+                                        finish_header_command();
+                                    end else if (
+                                        request_command == CMD_READ_START &&
+                                        request_length >= 16'd512 &&
+                                        request_length <= 16'd4096 &&
+                                        request_length[8:0] == 9'd0) begin
                                         rx_state <= RX_DISCARD;
                                         debug_request_seen <= 1'b1;
                                         finish_header_command();
@@ -472,15 +495,19 @@ module fpga_spi_block_bridge (
             end
 
             if (scan_active) begin
-                if (!scan_phase) begin
+                if (scan_phase == 2'd0) begin
+                    /*
+                     * Present scan_index to the synchronous SD-buffer read
+                     * port and allow one clock for its registered output.
+                     */
+                    scan_phase <= 2'd1;
+                end else if (scan_phase == 2'd1) begin
                     // Break the block-RAM -> CRC combinational timing path.
                     scan_data_reg <= scan_byte;
-                    if (response_payload_kind == PAYLOAD_BLOCK)
-                        response_buffer[scan_index[8:0]] <= buffer_rdata;
-                    scan_phase <= 1'b1;
+                    scan_phase <= 2'd2;
                 end else begin
                     response_crc_work <= scan_crc_next;
-                    scan_phase <= 1'b0;
+                    scan_phase <= 2'd0;
                     if (scan_index + 16'd1 == response_length) begin
                         response_crc <= scan_crc_next ^ 32'hffff_ffff;
                         scan_active <= 1'b0;
