@@ -99,7 +99,9 @@ module top (
         .error(card_error), .error_code(card_error_code)
     );
 
-    fpga_sclk_block_bridge bridge_i (
+    fpga_sclk_block_bridge #(
+        .ALLOW_WRITES(1'b0)
+    ) bridge_i (
         .clk(system_clk), .rst(rst),
         .spi_csn(spi_csn), .spi_sclk(spi_sclk_global),
         .spi_mosi(spi_mosi), .spi_miso(spi_miso),

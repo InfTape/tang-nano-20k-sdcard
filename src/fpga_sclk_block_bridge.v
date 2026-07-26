@@ -6,7 +6,9 @@
  * frontend. Read payloads live in two 16 KiB dual-clock banks; write payloads
  * use a separate 16 KiB dual-clock bank.
  */
-module fpga_sclk_block_bridge (
+module fpga_sclk_block_bridge #(
+    parameter ALLOW_WRITES = 1'b1
+) (
     input  wire        clk,
     input  wire        rst,
 
@@ -428,7 +430,9 @@ module fpga_sclk_block_bridge (
                         end
 
                         CMD_WRITE_DATA: begin
-                            if (!sys_request_has_payload ||
+                            if (!ALLOW_WRITES) begin
+                                queue_empty_response(STATUS_IO_ERROR);
+                            end else if (!sys_request_has_payload ||
                                 !request_length_valid ||
                                 !request_range_valid) begin
                                 queue_empty_response(STATUS_BAD_REQUEST);
