@@ -21,11 +21,11 @@ module tb_fpga_spi_block_bridge;
     wire read_request;
     wire write_request;
     wire [31:0] request_lba;
-    wire [3:0] request_block_count;
+    wire [5:0] request_block_count;
     wire [11:0] buffer_addr;
     reg [7:0] memory [0:4095];
     reg [7:0] buffer_rdata;
-    reg [11:0] write_buffer_addr = 0;
+    reg [13:0] write_buffer_addr = 0;
     wire [7:0] write_buffer_data;
 
     integer read_pulses = 0;
@@ -290,7 +290,7 @@ module tb_fpga_spi_block_bridge;
             $fatal;
         end
         for (i = 0; i < 512; i = i + 1) begin
-            write_buffer_addr = i[11:0];
+            write_buffer_addr = {2'b00, i[11:0]};
             #20;
             if (write_buffer_data != (i[7:0] ^ 8'h3c)) begin
                 $display("FAIL: WRITE_DATA buffer byte %0d", i);
@@ -321,7 +321,7 @@ module tb_fpga_spi_block_bridge;
             $fatal;
         end
         for (i = 0; i < 4096; i = i + 1) begin
-            write_buffer_addr = i[11:0];
+            write_buffer_addr = {2'b00, i[11:0]};
             #20;
             if (write_buffer_data !=
                 (i[7:0] ^ i[11:8] ^ 8'h69)) begin

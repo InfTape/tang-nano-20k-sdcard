@@ -66,6 +66,24 @@ try {
             "sim\tb_spi_sclk_mailbox.sv"
         )
 
+    Invoke-VerilogTest -Top "tb_ping_pong_buffer" `
+        -Output "sim\ping_pong_buffer.vvp" `
+        -Sources @(
+            "src\dual_clock_byte_buffer.v",
+            "src\ping_pong_owner.v",
+            "sim\tb_ping_pong_buffer.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_fpga_sclk_block_bridge" `
+        -Output "sim\fpga_sclk_block_bridge.vvp" `
+        -Sources @(
+            "src\spi_sclk_mailbox.v",
+            "src\dual_clock_byte_buffer.v",
+            "src\ping_pong_owner.v",
+            "src\fpga_sclk_block_bridge.v",
+            "sim\tb_fpga_sclk_block_bridge.sv"
+        )
+
     Invoke-VerilogTest -Top "tb_sd_native_block_device_read_batch" `
         -Output "sim\sd_native_block_device_read_batch.vvp" `
         -Sources @(

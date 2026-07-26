@@ -27,11 +27,14 @@ module tb_spi_sclk_mailbox;
     reg [7:0] sys_response_status = 0;
     reg [15:0] sys_response_length = 0;
     reg [31:0] sys_response_crc = 0;
+    reg sys_response_buffer = 0;
+    reg sys_response_inline = 0;
+    reg [63:0] sys_response_inline_data = 0;
     wire sys_response_done;
 
-    wire [13:0] response_buffer_addr_sclk;
+    wire [14:0] response_buffer_addr_sclk;
     reg [7:0] response_buffer_data_sclk = 0;
-    reg [7:0] response_memory [0:16383];
+    reg [7:0] response_memory [0:32767];
 
     integer i;
     integer request_count = 0;
@@ -56,6 +59,9 @@ module tb_spi_sclk_mailbox;
         .sys_response_status(sys_response_status),
         .sys_response_length(sys_response_length),
         .sys_response_crc(sys_response_crc),
+        .sys_response_buffer(sys_response_buffer),
+        .sys_response_inline(sys_response_inline),
+        .sys_response_inline_data(sys_response_inline_data),
         .sys_response_done(sys_response_done),
         .response_buffer_addr_sclk(response_buffer_addr_sclk),
         .response_buffer_data_sclk(response_buffer_data_sclk)
@@ -162,12 +168,18 @@ module tb_spi_sclk_mailbox;
         input [7:0] status;
         input [15:0] length;
         input [31:0] response_crc;
+        input buffer_bank;
+        input inline_payload;
+        input [63:0] inline_data;
         begin
             wait (sys_response_ready);
             @(negedge sys_clk);
             sys_response_status = status;
             sys_response_length = length;
             sys_response_crc = response_crc;
+            sys_response_buffer = buffer_bank;
+            sys_response_inline = inline_payload;
+            sys_response_inline_data = inline_data;
             sys_response_valid = 1;
             @(negedge sys_clk);
             sys_response_valid = 0;
@@ -193,7 +205,8 @@ module tb_spi_sclk_mailbox;
     initial begin
         for (i = 0; i < 16384; i = i + 1) begin
             request_memory[i] = 0;
-            response_memory[i] = i[7:0] ^ 8'h6d;
+            response_memory[i] = i[7:0] ^ 8'h91;
+            response_memory[16384 + i] = i[7:0] ^ 8'h6d;
         end
 
         #20;
@@ -210,8 +223,9 @@ module tb_spi_sclk_mailbox;
         // Return 32 bytes through a synchronous SCLK-domain buffer port.
         crc = 32'hffff_ffff;
         for (i = 0; i < 32; i = i + 1)
-            crc = crc32_byte(crc, response_memory[i]);
-        submit_response(8'h00, 16'd32, crc ^ 32'hffff_ffff);
+            crc = crc32_byte(crc, response_memory[16384 + i]);
+        submit_response(8'h00, 16'd32, crc ^ 32'hffff_ffff,
+                        1'b1, 1'b0, 64'd0);
 
         receive_response_magic();
         spi_transfer_byte(8'hff, rx_byte);
@@ -237,9 +251,9 @@ module tb_spi_sclk_mailbox;
         crc = 32'hffff_ffff;
         for (i = 0; i < 32; i = i + 1) begin
             spi_transfer_byte(8'hff, rx_byte);
-            if (rx_byte != response_memory[i]) begin
+            if (rx_byte != response_memory[16384 + i]) begin
                 $display("FAIL: response payload[%0d]=%02x expected=%02x",
-                         i, rx_byte, response_memory[i]);
+                         i, rx_byte, response_memory[16384 + i]);
                 $fatal;
             end
             crc = crc32_byte(crc, rx_byte);
@@ -285,7 +299,8 @@ module tb_spi_sclk_mailbox;
                 $fatal;
             end
         end
-        submit_response(8'h00, 16'd0, 32'd0);
+        submit_response(8'h00, 16'd0, 32'd0,
+                        1'b0, 1'b0, 64'd0);
         receive_response_magic();
         spi_transfer_byte(8'hff, rx_byte);
         if (rx_byte != 8'h00) begin

@@ -11,6 +11,10 @@
         <File path="src/sd_native_data_rx.v" type="file.verilog" enable="1"/>
         <File path="src/sd_native_data_tx.v" type="file.verilog" enable="1"/>
         <File path="src/sd_native_block_device.v" type="file.verilog" enable="1"/>
+        <File path="src/dual_clock_byte_buffer.v" type="file.verilog" enable="1"/>
+        <File path="src/ping_pong_owner.v" type="file.verilog" enable="1"/>
+        <File path="src/spi_sclk_mailbox.v" type="file.verilog" enable="1"/>
+        <File path="src/fpga_sclk_block_bridge.v" type="file.verilog" enable="1"/>
         <File path="src/fpga_spi_block_bridge.v" type="file.verilog" enable="1"/>
         <File path="src/top.v" type="file.verilog" enable="1"/>
         <File path="constraints/tang_nano_20k.cst" type="file.cst" enable="1"/>

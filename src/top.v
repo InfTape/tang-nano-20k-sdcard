@@ -22,11 +22,16 @@ module top (
     inout  wire       sd_dat3
 );
     wire system_clk;
+    wire spi_sclk_global;
     wire pll_lock;
     pll_48m pll_i (
         .clkin(clk),
         .clkout(system_clk),
         .lock(pll_lock)
+    );
+    BUFG spi_clock_buffer_i (
+        .I(spi_sclk),
+        .O(spi_sclk_global)
     );
 
     reg [15:0] power_on_reset = 16'd0;
@@ -62,10 +67,11 @@ module top (
     wire read_request;
     wire write_request;
     wire [31:0] request_lba;
-    wire [3:0] request_block_count;
-    wire [11:0] buffer_addr;
-    wire [7:0] buffer_rdata;
-    wire [11:0] write_buffer_addr;
+    wire [5:0] request_block_count;
+    wire read_buffer_we;
+    wire [13:0] read_buffer_addr;
+    wire [7:0] read_buffer_data;
+    wire [13:0] write_buffer_addr;
     wire [7:0] write_buffer_data;
     wire debug_cs_seen;
     wire debug_sclk_seen;
@@ -82,8 +88,9 @@ module top (
         .read_request(read_request), .write_request(write_request),
         .request_lba(request_lba),
         .request_block_count(request_block_count),
-        .host_buffer_addr(buffer_addr),
-        .host_buffer_rdata(buffer_rdata),
+        .read_buffer_we(read_buffer_we),
+        .read_buffer_addr(read_buffer_addr),
+        .read_buffer_data(read_buffer_data),
         .write_buffer_addr(write_buffer_addr),
         .write_buffer_data(write_buffer_data),
         .card_ready(card_ready), .card_sdhc(card_sdhc),
@@ -92,9 +99,9 @@ module top (
         .error(card_error), .error_code(card_error_code)
     );
 
-    fpga_spi_block_bridge bridge_i (
+    fpga_sclk_block_bridge bridge_i (
         .clk(system_clk), .rst(rst),
-        .spi_csn(spi_csn), .spi_sclk(spi_sclk),
+        .spi_csn(spi_csn), .spi_sclk(spi_sclk_global),
         .spi_mosi(spi_mosi), .spi_miso(spi_miso),
         .card_ready(card_ready), .card_sdhc(card_sdhc),
         .card_busy(card_busy), .card_read_ready(card_read_ready),
@@ -103,7 +110,9 @@ module top (
         .read_request(read_request), .write_request(write_request),
         .request_lba(request_lba),
         .request_block_count(request_block_count),
-        .buffer_addr(buffer_addr), .buffer_rdata(buffer_rdata),
+        .read_buffer_we(read_buffer_we),
+        .read_buffer_addr(read_buffer_addr),
+        .read_buffer_data(read_buffer_data),
         .write_buffer_addr(write_buffer_addr),
         .write_buffer_data(write_buffer_data),
         .debug_cs_seen(debug_cs_seen),

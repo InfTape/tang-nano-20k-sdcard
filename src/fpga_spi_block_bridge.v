@@ -23,11 +23,11 @@ module fpga_spi_block_bridge (
     output reg         read_request,
     output reg         write_request,
     output reg  [31:0] request_lba,
-    output reg  [3:0]  request_block_count,
+    output reg  [5:0]  request_block_count,
 
     output wire [11:0] buffer_addr,
     input  wire [7:0]  buffer_rdata,
-    input  wire [11:0] write_buffer_addr,
+    input  wire [13:0] write_buffer_addr,
     output reg  [7:0]  write_buffer_data,
 
     output reg         debug_cs_seen,
@@ -282,7 +282,7 @@ module fpga_spi_block_bridge (
                         start_response(STATUS_BAD_REQUEST, 0, PAYLOAD_NONE);
                     else begin
                         request_block_count <= request_length == 0 ?
-                            4'd1 : request_length[12:9];
+                            6'd1 : {2'd0, request_length[12:9]};
                         read_data_length <= request_length == 0 ?
                             16'd512 : request_length;
                         read_request <= 1'b1;
@@ -307,7 +307,7 @@ module fpga_spi_block_bridge (
     always @(posedge clk) begin
         read_request <= 1'b0;
         write_request <= 1'b0;
-        write_buffer_data <= request_buffer[write_buffer_addr];
+        write_buffer_data <= request_buffer[write_buffer_addr[11:0]];
 
         if (rst) begin
             rx_state <= RX_HEADER;
@@ -318,7 +318,7 @@ module fpga_spi_block_bridge (
             request_magic_ok <= 1'b0;
             request_command <= 8'd0;
             request_lba <= 32'd0;
-            request_block_count <= 4'd1;
+            request_block_count <= 6'd1;
             request_length <= 16'd0;
             read_data_length <= 16'd512;
             payload_count <= 16'd0;
@@ -476,7 +476,7 @@ module fpga_spi_block_bridge (
                                                        PAYLOAD_NONE);
                                     end else begin
                                         request_block_count <=
-                                            request_length[12:9];
+                                            {2'd0, request_length[12:9]};
                                         write_request <= 1'b1;
                                         start_response(STATUS_OK, 0,
                                                        PAYLOAD_NONE);

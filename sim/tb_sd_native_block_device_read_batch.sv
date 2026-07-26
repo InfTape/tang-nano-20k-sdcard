@@ -16,10 +16,11 @@ module tb_sd_native_block_device_read_batch;
     reg read_request = 0;
     reg write_request = 0;
     reg [31:0] request_lba = 0;
-    reg [3:0] request_block_count = 1;
-    reg [11:0] host_buffer_addr = 0;
-    wire [7:0] host_buffer_rdata;
-    wire [11:0] write_buffer_addr;
+    reg [5:0] request_block_count = 1;
+    wire read_buffer_we;
+    wire [13:0] read_buffer_addr;
+    wire [7:0] read_buffer_data;
+    wire [13:0] write_buffer_addr;
     reg [7:0] write_buffer_data = 0;
     wire card_ready;
     wire card_sdhc;
@@ -43,8 +44,9 @@ module tb_sd_native_block_device_read_batch;
         .read_request(read_request), .write_request(write_request),
         .request_lba(request_lba),
         .request_block_count(request_block_count),
-        .host_buffer_addr(host_buffer_addr),
-        .host_buffer_rdata(host_buffer_rdata),
+        .read_buffer_we(read_buffer_we),
+        .read_buffer_addr(read_buffer_addr),
+        .read_buffer_data(read_buffer_data),
         .write_buffer_addr(write_buffer_addr),
         .write_buffer_data(write_buffer_data),
         .card_ready(card_ready), .card_sdhc(card_sdhc),
@@ -97,7 +99,7 @@ module tb_sd_native_block_device_read_batch;
         dut.capacity_blocks = 32'h0010_0000;
 
         request_lba = 32'h0001_2340;
-        request_block_count = 4'd3;
+        request_block_count = 6'd3;
         read_request = 1;
         @(negedge clk);
         read_request = 0;
@@ -111,8 +113,8 @@ module tb_sd_native_block_device_read_batch;
 
         repeat (2) @(posedge clk);
         if (!read_ready || operation_busy || error ||
-            dut.active_block_index != 4'd2 ||
-            dut.active_block_count != 4'd3) begin
+            dut.active_block_index != 6'd2 ||
+            dut.active_block_count != 6'd3) begin
             $display("FAIL: batch completion ready=%0d busy=%0d error=%0d index=%0d count=%0d",
                      read_ready, operation_busy, error,
                      dut.active_block_index, dut.active_block_count);

@@ -42,9 +42,12 @@ module spi_sclk_mailbox #(
     input  wire [7:0]  sys_response_status,
     input  wire [15:0] sys_response_length,
     input  wire [31:0] sys_response_crc,
+    input  wire        sys_response_buffer,
+    input  wire        sys_response_inline,
+    input  wire [63:0] sys_response_inline_data,
     output reg         sys_response_done,
 
-    output wire [BUFFER_ADDR_WIDTH-1:0]
+    output wire [BUFFER_ADDR_WIDTH:0]
                        response_buffer_addr_sclk,
     input  wire [7:0]  response_buffer_data_sclk
 );
@@ -53,6 +56,7 @@ module spi_sclk_mailbox #(
         RX_PAYLOAD = 2'd1,
         RX_PAYLOAD_CRC = 2'd2,
         RX_DISCARD = 2'd3;
+    localparam [7:0] CMD_WRITE_DATA = 8'h05;
 
     function [31:0] crc32_update;
         input [31:0] crc_in;
@@ -106,7 +110,9 @@ module spi_sclk_mailbox #(
                            received_byte == header_xor;
     wire header_commits_request =
         header_complete &&
-        (!header_check_ok || request_length_sclk == 0 ||
+        (!header_check_ok ||
+         request_command_sclk != CMD_WRITE_DATA ||
+         request_length_sclk == 0 ||
          request_length_sclk > MAX_PAYLOAD_BYTES);
     wire payload_crc_complete = received_byte_valid &&
                                 rx_state == RX_PAYLOAD_CRC &&
@@ -145,6 +151,9 @@ module spi_sclk_mailbox #(
     reg [7:0] response_status_mailbox;
     reg [15:0] response_length_mailbox;
     reg [31:0] response_crc_mailbox;
+    reg response_buffer_mailbox;
+    reg response_inline_mailbox;
+    reg [63:0] response_inline_data_mailbox;
     reg response_toggle_sys;
     reg response_busy_sys;
 
@@ -218,6 +227,8 @@ module spi_sclk_mailbox #(
                             8: begin
                                 request_header_ok <= header_check_ok;
                                 if (!header_check_ok ||
+                                    request_command_sclk !=
+                                        CMD_WRITE_DATA ||
                                     request_length_sclk == 0 ||
                                     request_length_sclk >
                                         MAX_PAYLOAD_BYTES) begin
@@ -326,6 +337,9 @@ module spi_sclk_mailbox #(
             response_status_mailbox <= 8'd0;
             response_length_mailbox <= 16'd0;
             response_crc_mailbox <= 32'd0;
+            response_buffer_mailbox <= 1'b0;
+            response_inline_mailbox <= 1'b0;
+            response_inline_data_mailbox <= 64'd0;
             response_toggle_sys <= 1'b0;
             response_busy_sys <= 1'b0;
             response_done_sync1 <= 1'b0;
@@ -350,6 +364,9 @@ module spi_sclk_mailbox #(
                 response_status_mailbox <= sys_response_status;
                 response_length_mailbox <= sys_response_length;
                 response_crc_mailbox <= sys_response_crc;
+                response_buffer_mailbox <= sys_response_buffer;
+                response_inline_mailbox <= sys_response_inline;
+                response_inline_data_mailbox <= sys_response_inline_data;
                 response_toggle_sys <= ~response_toggle_sys;
                 response_busy_sys <= 1'b1;
             end
@@ -371,6 +388,9 @@ module spi_sclk_mailbox #(
     reg [7:0] tx_response_status;
     reg [15:0] tx_response_length;
     reg [31:0] tx_response_crc;
+    reg tx_response_buffer;
+    reg tx_response_inline;
+    reg [63:0] tx_response_inline_data;
 
     wire [15:0] tx_last_byte_index =
         tx_response_length == 0 ? 16'd6 :
@@ -385,7 +405,8 @@ module spi_sclk_mailbox #(
         tx_byte_index < 16'd6 + tx_response_length ?
             tx_byte_index - 16'd6 : 16'd0;
     assign response_buffer_addr_sclk =
-        response_prefetch_index[BUFFER_ADDR_WIDTH-1:0];
+        {tx_response_buffer,
+         response_prefetch_index[BUFFER_ADDR_WIDTH-1:0]};
 
     function [7:0] response_byte;
         input [15:0] index;
@@ -421,6 +442,23 @@ module spi_sclk_mailbox #(
         end
     endfunction
 
+    function [7:0] inline_response_byte;
+        input [15:0] index;
+        begin
+            case (index)
+                0: inline_response_byte = tx_response_inline_data[7:0];
+                1: inline_response_byte = tx_response_inline_data[15:8];
+                2: inline_response_byte = tx_response_inline_data[23:16];
+                3: inline_response_byte = tx_response_inline_data[31:24];
+                4: inline_response_byte = tx_response_inline_data[39:32];
+                5: inline_response_byte = tx_response_inline_data[47:40];
+                6: inline_response_byte = tx_response_inline_data[55:48];
+                7: inline_response_byte = tx_response_inline_data[63:56];
+                default: inline_response_byte = 8'd0;
+            endcase
+        end
+    endfunction
+
     assign spi_miso = (!spi_csn && tx_active) ?
                       tx_shift[3'd7 - tx_bit_count] : 1'b1;
 
@@ -433,6 +471,9 @@ module spi_sclk_mailbox #(
             tx_response_status <= 8'd0;
             tx_response_length <= 16'd0;
             tx_response_crc <= 32'd0;
+            tx_response_buffer <= 1'b0;
+            tx_response_inline <= 1'b0;
+            tx_response_inline_data <= 64'd0;
         end else if (load_response) begin
             tx_active <= 1'b1;
             tx_bit_count <= 3'd0;
@@ -441,6 +482,9 @@ module spi_sclk_mailbox #(
             tx_response_status <= response_status_mailbox;
             tx_response_length <= response_length_mailbox;
             tx_response_crc <= response_crc_mailbox;
+            tx_response_buffer <= response_buffer_mailbox;
+            tx_response_inline <= response_inline_mailbox;
+            tx_response_inline_data <= response_inline_data_mailbox;
         end else if (tx_active) begin
             if (tx_bit_count == 3'd7) begin
                 tx_bit_count <= 3'd0;
@@ -449,7 +493,10 @@ module spi_sclk_mailbox #(
                 end else begin
                     tx_byte_index <= tx_next_byte_index;
                     if (tx_next_is_payload)
-                        tx_shift <= response_buffer_data_sclk;
+                        tx_shift <= tx_response_inline ?
+                            inline_response_byte(
+                                tx_next_byte_index - 16'd7) :
+                            response_buffer_data_sclk;
                     else
                         tx_shift <= response_byte(tx_next_byte_index);
                 end
