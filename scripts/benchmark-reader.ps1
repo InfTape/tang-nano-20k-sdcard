@@ -7,6 +7,12 @@ param(
     [ValidateRange(1, 64)]
     [int]$SizeMiB = 1,
 
+    [ValidateRange(0, 20)]
+    [int]$ReadRuns = 0,
+
+    [ValidateRange(4, 4096)]
+    [int]$ReadBufferKiB = 1024,
+
     [switch]$Keep
 )
 
@@ -50,7 +56,8 @@ try {
     $timer.Stop()
 
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-    [pscustomobject]@{
+    $writeResult = [pscustomobject]@{
+        Phase = "Write"
         Path = $path
         Bytes = $data.Length
         WriteSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 3)
@@ -58,6 +65,29 @@ try {
             ($data.Length / 1KB) / $timer.Elapsed.TotalSeconds, 2)
         SHA256 = $actual
         HashMatch = ($expected -eq $actual)
+    }
+    $writeResult
+
+    if (-not $writeResult.HashMatch) {
+        throw "Written file SHA-256 did not match the source buffer."
+    }
+
+    if ($ReadRuns -gt 0) {
+        $readScript = Join-Path $PSScriptRoot "benchmark-read.ps1"
+        for ($run = 1; $run -le $ReadRuns; $run++) {
+            $readResult = & $readScript -Path $path `
+                -BufferKiB $ReadBufferKiB
+            [pscustomobject]@{
+                Phase = "Read"
+                Run = $run
+                Path = $path
+                Bytes = $readResult.Bytes
+                ReadSeconds = $readResult.ReadSeconds
+                ReadKiBPerSecond = $readResult.ReadKiBPerSecond
+                ReadMiBPerSecond = $readResult.ReadMiBPerSecond
+                NoBuffering = $readResult.NoBuffering
+            }
+        }
     }
 } finally {
     if (-not $Keep -and (Test-Path -LiteralPath $path)) {

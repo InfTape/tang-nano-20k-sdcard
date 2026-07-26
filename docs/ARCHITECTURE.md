@@ -6,7 +6,8 @@
 Windows USB MSC
       |
     BL616
-  CherryUSB + 16 KiB buffer
+  CherryUSB MSC thread + 16 KiB transfer buffer
+  three 16 KiB background prefetch slots
       |
   private mode-0 SPI link at 6 MHz
   CS=GPIO0, SCLK=GPIO1, MOSI=GPIO27, MISO=GPIO30
@@ -26,10 +27,9 @@ CMD16 where applicable. The card must be SDHC or SDXC.
 Single-block reads use CMD17. Multi-block reads issue one CMD18, collect up to
 32 sequential sectors in a 16 KiB buffer, then issue CMD12 and wait for DAT0
 to leave busy before returning the batch. Writes use CMD24 for one sector and
-`CMD55 -> ACMD23 -> CMD25 -> CMD12` for batches of two to eight sectors. Each
-SD lane has an independent CRC16. The BL616/FPGA transport uses CRC32 for
-payloads. The current high-speed validation image sets `ALLOW_WRITES=0`, so
-write requests are rejected before reaching the SD controller.
+`CMD55 -> ACMD23 -> CMD25 -> CMD12` for batches of up to 32 sectors. Each SD
+lane has an independent CRC16. The BL616/FPGA transport uses CRC32 for
+payloads. The validated image sets `ALLOW_WRITES=1`.
 
 The BL616 drives SCLK, MOSI, and MISO with hardware SPI0 in mode 0. GPIO0
 remains a software-controlled chip select so it stays asserted across the
@@ -43,11 +43,27 @@ cross compact request and response descriptors to the 48 MHz system domain,
 while payload bytes use dual-clock block RAM. A two-bank owner state machine
 tracks `FREE -> PRODUCER -> READY -> CONSUMER`.
 
-The dual buffers and ownership protocol are implemented, but speculative
-prefetch is not: the current controller fills a requested bank before the host
-retrieves it. A 10 MHz experiment returned inconsistent read data; restoring
-6 MHz produced a clean file-system scan and matching file hashes. DMA is not
-part of the validated implementation.
+The FPGA may start filling a free bank while the other bank is ready or being
+returned over SPI. The BL616 background worker reserves two 16 KiB cache
+slots, starts the first read, starts the second read into the other FPGA bank,
+retrieves the first while the second is filling, then retrieves the second.
+Three BL616 slots allow one READY slot to serve the USB MSC thread while the
+worker fills the other two. The MSC callbacks run in CherryUSB thread mode;
+the lower-priority prefetch task runs while endpoint transfers wait for USB,
+so SD access, private-link transfer, and USB service overlap.
+
+High-level private-link operations have a separate mutex so the multi-exchange
+start/status/data sequence cannot interleave with a direct read or write.
+Writes cancel speculative reads before taking this operation lock. SD write
+completion uses a five-second real-time deadline and yields between busy
+polls, accommodating card erase and page-folding pauses.
+
+The design is constrained at 20 MHz SCLK. The validated place-and-route
+reported 38.747 MHz SCLK Fmax and zero setup/hold TNS for constrained clock
+domains. A 10 MHz board experiment nevertheless returned inconsistent read
+data; restoring 6 MHz produced a clean file-system scan and matching file
+hashes, so the deployed private-link clock remains 6 MHz. DMA is not part of
+the validated implementation.
 
 ## USB boot modes
 
