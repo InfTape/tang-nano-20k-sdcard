@@ -26,12 +26,15 @@
 #define LINK_CMD_READ_DATA   0x04
 #define LINK_CMD_WRITE_DATA  0x05
 
+#define LINK_READ_STATUS_TIMEOUT_US   1000000u
+#define LINK_WRITE_STATUS_TIMEOUT_US  5000000u
+
 #ifndef FPGA_LINK_USE_HW_SPI
 #define FPGA_LINK_USE_HW_SPI 1
 #endif
 
 #ifndef FPGA_LINK_SPI_FREQUENCY
-#define FPGA_LINK_SPI_FREQUENCY 4000000u
+#define FPGA_LINK_SPI_FREQUENCY 6000000u
 #endif
 
 #if FPGA_LINK_USE_HW_SPI
@@ -58,6 +61,7 @@ static struct bflb_device_s *gpio;
 static struct bflb_device_s *spi0;
 #endif
 static SemaphoreHandle_t link_mutex;
+static SemaphoreHandle_t operation_mutex;
 static volatile uint8_t last_exchange_error;
 static volatile uint32_t last_diagnostic;
 
@@ -355,8 +359,11 @@ static int wait_for_status(uint8_t wanted, uint8_t diagnostic_stage)
     uint8_t payload[8];
     uint8_t status = 0xff;
     uint16_t length;
+    uint32_t timeout_us = diagnostic_stage == 4 ?
+        LINK_WRITE_STATUS_TIMEOUT_US : LINK_READ_STATUS_TIMEOUT_US;
+    uint64_t deadline = bflb_mtimer_get_time_us() + timeout_us;
 
-    for (unsigned retry = 0; retry < 500; retry++) {
+    do {
         if (exchange(LINK_CMD_STATUS, 0, NULL, 0, payload,
                      sizeof(payload), &status, &length) == 0) {
             if (status == wanted)
@@ -367,10 +374,39 @@ static int wait_for_status(uint8_t wanted, uint8_t diagnostic_stage)
                 return -1;
             }
         }
-    }
+
+        /*
+         * A multi-block SD write can stay busy for hundreds of milliseconds
+         * while the card erases or folds flash pages.  Yield between write
+         * polls so the USB stack remains responsive.  Reads normally finish
+         * in a few milliseconds and retain fine-grained polling.
+         */
+        if (diagnostic_stage == 4 &&
+            xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+            vTaskDelay(pdMS_TO_TICKS(1));
+        else
+            bflb_mtimer_delay_us(50);
+    } while (bflb_mtimer_get_time_us() < deadline);
+
     last_diagnostic = ((uint32_t)diagnostic_stage << 16) |
                       ((uint32_t)status << 8) | last_exchange_error;
     return -2;
+}
+
+static bool operation_begin(void)
+{
+    if (!operation_mutex ||
+        xTaskGetSchedulerState() != taskSCHEDULER_RUNNING)
+        return true;
+    return xSemaphoreTake(operation_mutex,
+                          pdMS_TO_TICKS(2000)) == pdTRUE;
+}
+
+static void operation_end(void)
+{
+    if (operation_mutex &&
+        xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+        xSemaphoreGive(operation_mutex);
 }
 
 void fpga_link_init(void)
@@ -415,6 +451,7 @@ void fpga_link_init(void)
     *reg_mosi |= GPIO_SET;
 #endif
     link_mutex = xSemaphoreCreateMutex();
+    operation_mutex = xSemaphoreCreateMutex();
 }
 
 int fpga_link_get_capacity(uint32_t *block_count)
@@ -423,8 +460,12 @@ int fpga_link_get_capacity(uint32_t *block_count)
     uint8_t status;
     uint16_t length;
 
-    if (exchange(LINK_CMD_INFO, 0, NULL, 0, payload, sizeof(payload),
-                 &status, &length) || status != FPGA_STATUS_OK || length != 8)
+    if (!operation_begin())
+        return -1;
+    int result = exchange(LINK_CMD_INFO, 0, NULL, 0, payload,
+                          sizeof(payload), &status, &length);
+    operation_end();
+    if (result || status != FPGA_STATUS_OK || length != 8)
         return -1;
     *block_count = load_le32(payload);
     return (*block_count != 0) ? 0 : -1;
@@ -435,25 +476,27 @@ int fpga_link_read_sector(uint32_t lba, uint8_t *data)
     return fpga_link_read_blocks(lba, data, 1);
 }
 
-int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
-                          uint8_t block_count)
+static int read_start(uint32_t lba, uint8_t block_count)
 {
     uint8_t status = 0xff;
     uint16_t length = 0;
-    uint16_t transfer_length;
+    uint16_t transfer_length = (uint16_t)block_count * 512u;
 
-    if (block_count == 0 || block_count > 8)
-        return -1;
-    transfer_length = (uint16_t)block_count * 512u;
-    last_diagnostic = 0;
     if (exchange(LINK_CMD_READ_START, lba, NULL, transfer_length, NULL, 0,
                  &status, &length) || status != FPGA_STATUS_OK) {
         last_diagnostic = (1u << 16) | ((uint32_t)status << 8) |
                           last_exchange_error;
         return -1;
     }
-    if (wait_for_status(FPGA_STATUS_READ_READY, 2))
-        return -2;
+    return 0;
+}
+
+static int read_data(uint8_t *data, uint8_t block_count)
+{
+    uint8_t status = 0xff;
+    uint16_t length = 0;
+    uint16_t transfer_length = (uint16_t)block_count * 512u;
+
     if (exchange(LINK_CMD_READ_DATA, 0, NULL, 0, data, transfer_length,
                  &status, &length) || status != FPGA_STATUS_OK ||
         length != transfer_length) {
@@ -462,6 +505,54 @@ int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
         return -3;
     }
     return 0;
+}
+
+int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
+                          uint8_t block_count)
+{
+    int result;
+
+    if (block_count == 0 || block_count > 32 || !operation_begin())
+        return -1;
+    last_diagnostic = 0;
+    result = read_start(lba, block_count);
+    if (result == 0 &&
+        wait_for_status(FPGA_STATUS_READ_READY, 2))
+        result = -2;
+    if (result == 0)
+        result = read_data(data, block_count);
+    operation_end();
+    return result;
+}
+
+int fpga_link_read_two_batches(uint32_t first_lba, uint8_t *first_data,
+                               uint8_t first_block_count,
+                               uint32_t second_lba, uint8_t *second_data,
+                               uint8_t second_block_count)
+{
+    int result;
+
+    if (first_block_count == 0 || first_block_count > 32 ||
+        second_block_count == 0 || second_block_count > 32 ||
+        !operation_begin())
+        return -1;
+
+    last_diagnostic = 0;
+    result = read_start(first_lba, first_block_count);
+    if (result == 0 &&
+        wait_for_status(FPGA_STATUS_READ_READY, 2))
+        result = -2;
+    if (result == 0)
+        result = read_start(second_lba, second_block_count);
+    if (result == 0)
+        result = read_data(first_data, first_block_count);
+    if (result == 0 &&
+        wait_for_status(FPGA_STATUS_READ_READY, 2))
+        result = -2;
+    if (result == 0)
+        result = read_data(second_data, second_block_count);
+    operation_end();
+    return result;
 }
 
 int fpga_link_write_sector(uint32_t lba, const uint8_t *data)
@@ -474,14 +565,19 @@ int fpga_link_write_blocks(uint32_t lba, const uint8_t *data,
 {
     uint8_t status;
     uint16_t length;
+    int result;
 
-    if (block_count == 0 || block_count > 8)
+    if (block_count == 0 || block_count > 32 || !operation_begin())
         return -1;
-    if (exchange(LINK_CMD_WRITE_DATA, lba, data,
-                 (uint16_t)block_count * 512u, NULL, 0,
-                 &status, &length) || status != FPGA_STATUS_OK)
-        return -1;
-    return wait_for_status(FPGA_STATUS_OK, 4);
+    result = exchange(LINK_CMD_WRITE_DATA, lba, data,
+                      (uint16_t)block_count * 512u, NULL, 0,
+                      &status, &length);
+    if (result == 0 && status != FPGA_STATUS_OK)
+        result = -1;
+    if (result == 0)
+        result = wait_for_status(FPGA_STATUS_OK, 4);
+    operation_end();
+    return result;
 }
 
 uint32_t fpga_link_last_diagnostic(void)

@@ -52,11 +52,43 @@ try {
             "sim\tb_sd_native_data_tx.sv"
         )
 
+    Invoke-VerilogTest -Top "tb_sd_native_data_rx_multiblock" `
+        -Output "sim\sd_native_data_rx_multiblock.vvp" `
+        -Sources @(
+            "src\sd_native_data_rx.v",
+            "sim\tb_sd_native_data_rx_multiblock.sv"
+        )
+
     Invoke-VerilogTest -Top "tb_fpga_spi_block_bridge" `
         -Output "sim\fpga_spi_block_bridge.vvp" `
         -Sources @(
             "src\fpga_spi_block_bridge.v",
             "sim\tb_fpga_spi_block_bridge.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_spi_sclk_mailbox" `
+        -Output "sim\spi_sclk_mailbox.vvp" `
+        -Sources @(
+            "src\spi_sclk_mailbox.v",
+            "sim\tb_spi_sclk_mailbox.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_ping_pong_buffer" `
+        -Output "sim\ping_pong_buffer.vvp" `
+        -Sources @(
+            "src\dual_clock_byte_buffer.v",
+            "src\ping_pong_owner.v",
+            "sim\tb_ping_pong_buffer.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_fpga_sclk_block_bridge" `
+        -Output "sim\fpga_sclk_block_bridge.vvp" `
+        -Sources @(
+            "src\spi_sclk_mailbox.v",
+            "src\dual_clock_byte_buffer.v",
+            "src\ping_pong_owner.v",
+            "src\fpga_sclk_block_bridge.v",
+            "sim\tb_fpga_sclk_block_bridge.sv"
         )
 
     Invoke-VerilogTest -Top "tb_sd_native_block_device_read_batch" `
@@ -68,6 +100,17 @@ try {
             "src\sd_native_data_tx.v",
             "src\sd_native_block_device.v",
             "sim\tb_sd_native_block_device_read_batch.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_sd_native_block_device_write_batch" `
+        -Output "sim\sd_native_block_device_write_batch.vvp" `
+        -Sources @(
+            "src\sd_native_clock.v",
+            "src\sd_native_command.v",
+            "src\sd_native_data_rx.v",
+            "src\sd_native_data_tx.v",
+            "src\sd_native_block_device.v",
+            "sim\tb_sd_native_block_device_write_batch.sv"
         )
 
     & $Iverilog -g2005-sv -Wall -s sd_native_block_device `

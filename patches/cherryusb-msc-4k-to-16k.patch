@@ -1,0 +1,13 @@
+diff --git a/components/usb/cherryusb/class/msc/usbd_msc.c b/components/usb/cherryusb/class/msc/usbd_msc.c
+--- a/components/usb/cherryusb/class/msc/usbd_msc.c
++++ b/components/usb/cherryusb/class/msc/usbd_msc.c
+@@ -15,7 +15,7 @@
+ #define MSD_IN_EP_IDX  1
+ 
+-/* Limit bridge backend transactions without shrinking the USB DMA buffer. */
+-#define MSC_BACKEND_MAX_XFER 4096U
++/* Batch up to 32 512-byte sectors per MSC backend transfer. */
++#define MSC_BACKEND_MAX_XFER 16384U
+ 
+ /* Describe EndPoints configuration */
+ static struct usbd_endpoint mass_ep_data[CONFIG_USBDEV_MAX_BUS][2];

@@ -9,10 +9,14 @@ interface over the board's existing USB connector.
 
 - SDHC/SDXC initialization at a 24 MHz SD clock
 - Native 4-bit reads with per-lane CRC16
-- Up to eight sectors (4 KiB) per private-link read
+- Up to 32 sectors (16 KiB) per private-link read
+- CMD17 single-block reads and CMD18/CMD12 multi-block reads
 - Native 4-bit writes with CMD24 and CMD25
-- Up to eight sectors (4 KiB) per multi-block write
-- BL616 hardware SPI0 transport at a validated 4 MHz
+- Up to 32 sectors (16 KiB) per multi-block write
+- SCLK-domain mode-0 SPI slave with descriptor-based clock-domain crossing
+- Two 16 KiB dual-clock read buffers with explicit ownership tracking
+- Three BL616 16 KiB prefetch slots with SD/SPI/USB pipeline scheduling
+- BL616 hardware SPI0 transport at a validated 6 MHz
 - USB Mass Storage on Windows
 - DirtyJTAG v2 recovery through the same USB connector
 - Automatic WinUSB binding for DirtyJTAG; Zadig is not required
@@ -32,13 +36,25 @@ Hardware: Tang Nano 20K v3923, 125 GB SDXC card, Windows, exFAT.
 | 4 MiB no-buffering read after 4 KiB batching | 128.55–142.37 KiB/s |
 | 4 MiB no-buffering read with 4 MHz hardware SPI | 265.17–289.75 KiB/s |
 | 4 MiB buffered write with 4 MHz hardware SPI | 255.62 KiB/s |
+| 3.04 MiB no-buffering read with 6 MHz SPI and 16 KiB batches | 466.13-468.08 KiB/s |
+| 3.04 MiB no-buffering read with 6 MHz SPI and CMD18 | 555.48-557.05 KiB/s |
+| 16 MiB no-buffering read with background prefetch | 597.91-599.35 KiB/s steady |
+| 16 MiB buffered write, flush, and SHA-256 readback | 416.96-425.79 KiB/s |
+| 64 MiB buffered write, flush, and SHA-256 readback | 534.64 KiB/s |
 
-The validated configuration averages 277.46 KiB/s for repeated unbuffered
-reads, about 6.2 times the original read speed. It uses BL616 SPI0 in polling
-mode with software-controlled chip select; DMA is deliberately not enabled.
-The FPGA still issues one CMD17 per sector while collecting up to eight
-sequential sectors in a 4 KiB buffer. CMD18, reduced status polling, and a
-clock-domain-safe FPGA SPI slave remain future optimization work.
+The current configuration reaches 598.76 KiB/s across the four steady
+unbuffered 16 MiB read runs, about 13.3 times the original read speed. A
+lower-priority BL616 prefetch task fills the next two 16 KiB slots while the
+USB MSC thread sends the current slot. The FPGA can return one read bank over
+SPI while the SD controller fills the other with CMD18.
+
+Writes are enabled and were validated with forced flush, SHA-256 readback, a
+64 MiB sustained test, and a clean exFAT scan. SD programming busy is allowed
+up to five seconds so flash erase or page-folding pauses are not reported to
+USB as premature failures. The private link remains 6 MHz polling SPI with
+software-controlled chip select; DMA is deliberately not enabled. A 10 MHz
+hardware test returned inconsistent read data, so 6 MHz is the validated
+limit.
 
 See [Performance notes](docs/PERFORMANCE.md) for benchmark commands, tested
 configurations, and current limits.
@@ -130,13 +146,17 @@ mode selection and Flash layout.
 ## Verification performed
 
 - Native SD transmit CRC/status/busy simulation
+- CMD24 and ACMD23/CMD25/CMD12 controller simulations
 - BL616 link INFO, 4 KiB READ, 512-byte WRITE and 4 KiB WRITE with CRC32
+- Overlapped dual-bank read and SCLK-to-SD write-buffer simulation
 - Standalone compile of the native SD block controller
-- Gowin synthesis, placement and routing at a constrained 48 MHz
+- Gowin placement and routing at 48 MHz system clock and constrained 20 MHz
+  SCLK, with 38.747 MHz reported SCLK Fmax and zero constrained-clock TNS
 - DirtyJTAG detection of `GW2A(R)-18(C)`, IDCODE `0x81B`
 - Volatile SRAM load followed by external configuration-Flash write/verify
-- USB enumeration, exFAT mount, file hash comparison, hardware write test,
-  and repeated no-buffering 4 MiB read benchmarks
+- USB enumeration, exFAT mount, original-file hash comparison, 16 MiB and
+  64 MiB hardware write/readback tests, repeated no-buffering 16 MiB reads,
+  and a final clean file-system scan
 
 ## Credits
 

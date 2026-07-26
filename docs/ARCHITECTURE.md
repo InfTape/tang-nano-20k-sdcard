@@ -6,12 +6,15 @@
 Windows USB MSC
       |
     BL616
-  CherryUSB + 4 KiB buffer
+  CherryUSB MSC thread + 16 KiB transfer buffer
+  three 16 KiB background prefetch slots
       |
-  private mode-0 SPI link at 4 MHz
+  private mode-0 SPI link at 6 MHz
   CS=GPIO0, SCLK=GPIO1, MOSI=GPIO27, MISO=GPIO30
       |
    GW2AR-18 FPGA
+  SCLK-domain frontend + two 16 KiB read banks
+      |
   native SD 4-bit controller
       |
     microSD
@@ -21,23 +24,46 @@ The FPGA runs from a 48 MHz system clock and generates a 24 MHz SD clock.
 Initialization uses CMD0, CMD8, ACMD41, CMD2, CMD3, CMD9, CMD7, ACMD6, and
 CMD16 where applicable. The card must be SDHC or SDXC.
 
-Each read sector currently uses CMD17, but the FPGA collects up to eight
-sequential sectors in a 4 KiB buffer before returning one BL616-link response.
-Writes use CMD24 for one sector and `CMD55 -> ACMD23 -> CMD25 -> CMD12` for
-batches of two to eight sectors. Each SD lane has an independent CRC16. The
-BL616/FPGA transport uses CRC32 for payloads.
+Single-block reads use CMD17. Multi-block reads issue one CMD18, collect up to
+32 sequential sectors in a 16 KiB buffer, then issue CMD12 and wait for DAT0
+to leave busy before returning the batch. Writes use CMD24 for one sector and
+`CMD55 -> ACMD23 -> CMD25 -> CMD12` for batches of up to 32 sectors. Each SD
+lane has an independent CRC16. The BL616/FPGA transport uses CRC32 for
+payloads. The validated image sets `ALLOW_WRITES=1`.
 
 The BL616 drives SCLK, MOSI, and MISO with hardware SPI0 in mode 0. GPIO0
 remains a software-controlled chip select so it stays asserted across the
 request, FPGA processing delay, and response. The current validated clock is
-4 MHz and transfers use the polling SPI API. The bit-banged implementation is
+6 MHz and transfers use the polling SPI API. The bit-banged implementation is
 kept as a compile-time fallback by setting `FPGA_LINK_USE_HW_SPI=0`.
 
-The FPGA samples the private-link clock through its 48 MHz system-clock domain.
-A 6 MHz experiment enumerated USB but returned a corrupt capacity value, so
-4 MHz is the supported setting until the SPI receiver is moved into the SCLK
-domain or its clock-domain crossing is redesigned. DMA is not part of the
-validated implementation.
+The FPGA SPI shifter and bit counters run directly from SCLK. MISO changes on
+falling edges and is sampled by the BL616 on rising edges. Toggle mailboxes
+cross compact request and response descriptors to the 48 MHz system domain,
+while payload bytes use dual-clock block RAM. A two-bank owner state machine
+tracks `FREE -> PRODUCER -> READY -> CONSUMER`.
+
+The FPGA may start filling a free bank while the other bank is ready or being
+returned over SPI. The BL616 background worker reserves two 16 KiB cache
+slots, starts the first read, starts the second read into the other FPGA bank,
+retrieves the first while the second is filling, then retrieves the second.
+Three BL616 slots allow one READY slot to serve the USB MSC thread while the
+worker fills the other two. The MSC callbacks run in CherryUSB thread mode;
+the lower-priority prefetch task runs while endpoint transfers wait for USB,
+so SD access, private-link transfer, and USB service overlap.
+
+High-level private-link operations have a separate mutex so the multi-exchange
+start/status/data sequence cannot interleave with a direct read or write.
+Writes cancel speculative reads before taking this operation lock. SD write
+completion uses a five-second real-time deadline and yields between busy
+polls, accommodating card erase and page-folding pauses.
+
+The design is constrained at 20 MHz SCLK. The validated place-and-route
+reported 38.747 MHz SCLK Fmax and zero setup/hold TNS for constrained clock
+domains. A 10 MHz board experiment nevertheless returned inconsistent read
+data; restoring 6 MHz produced a clean file-system scan and matching file
+hashes, so the deployed private-link clock remains 6 MHz. DMA is not part of
+the validated implementation.
 
 ## USB boot modes
 

@@ -18,11 +18,12 @@ module sd_native_block_device (
     input  wire        read_request,
     input  wire        write_request,
     input  wire [31:0] request_lba,
-    input  wire [3:0]  request_block_count,
+    input  wire [5:0]  request_block_count,
 
-    input  wire [11:0] host_buffer_addr,
-    output wire [7:0]  host_buffer_rdata,
-    output wire [11:0] write_buffer_addr,
+    output wire        read_buffer_we,
+    output wire [13:0] read_buffer_addr,
+    output wire [7:0]  read_buffer_data,
+    output wire [13:0] write_buffer_addr,
     input  wire [7:0]  write_buffer_data,
 
     output reg         card_ready,
@@ -43,7 +44,8 @@ module sd_native_block_device (
         E_CMD17 = 8'h12, E_READ_DATA = 8'h13,
         E_CMD24 = 8'h14, E_WRITE_DATA = 8'h15,
         E_RANGE = 8'h16, E_TIMEOUT = 8'h17,
-        E_ACMD23 = 8'h18, E_CMD25 = 8'h19, E_CMD12 = 8'h1a;
+        E_ACMD23 = 8'h18, E_CMD25 = 8'h19, E_CMD12 = 8'h1a,
+        E_CMD18 = 8'h1b;
 
     localparam [5:0]
         S_POWER = 6'd0, S_CMD0_START = 6'd1, S_CMD0_WAIT = 6'd2,
@@ -67,7 +69,9 @@ module sd_native_block_device (
         S_WRITE55_START = 6'd34, S_WRITE55_WAIT = 6'd35,
         S_ACMD23_START = 6'd36, S_ACMD23_WAIT = 6'd37,
         S_WRITE_STOP_START = 6'd38, S_WRITE_STOP_WAIT = 6'd39,
-        S_WRITE_STOP_BUSY = 6'd40;
+        S_WRITE_STOP_BUSY = 6'd40,
+        S_READ_STOP_START = 6'd41, S_READ_STOP_WAIT = 6'd42,
+        S_READ_STOP_BUSY = 6'd43;
 
     reg [5:0] state;
     reg fast_clock;
@@ -137,26 +141,22 @@ module sd_native_block_device (
         .data_index(tx_data_index)
     );
 
-    reg [7:0] block_buffer [0:4095];
-    reg [11:0] rx_buffer_addr;
-    reg [7:0] host_buffer_rdata_reg;
-    assign host_buffer_rdata = host_buffer_rdata_reg;
-    reg [3:0] active_block_count;
-    reg [3:0] active_block_index;
-    assign write_buffer_addr = {active_block_index[2:0], tx_data_index};
+    reg [13:0] rx_buffer_addr;
+    reg [5:0] active_block_count;
+    reg [5:0] active_block_index;
+    assign read_buffer_we = data_valid && data_rx_enable;
+    assign read_buffer_addr = rx_buffer_addr;
+    assign read_buffer_data = data_byte;
+    assign write_buffer_addr = {active_block_index[4:0], tx_data_index};
 
     always @(posedge clk) begin
         if (rst) begin
-            rx_buffer_addr <= 12'd0;
-            host_buffer_rdata_reg <= 8'd0;
+            rx_buffer_addr <= 14'd0;
         end else begin
-            host_buffer_rdata_reg <= block_buffer[host_buffer_addr];
             if (read_request && card_ready && !operation_busy)
-                rx_buffer_addr <= 12'd0;
+                rx_buffer_addr <= 14'd0;
             else if (data_valid && data_rx_enable)
-                rx_buffer_addr <= rx_buffer_addr + 12'd1;
-            if (data_valid && data_rx_enable)
-                block_buffer[rx_buffer_addr] <= data_byte;
+                rx_buffer_addr <= rx_buffer_addr + 14'd1;
         end
     end
 
@@ -166,6 +166,8 @@ module sd_native_block_device (
     reg [7:0] settle_clock_count;
     reg [31:0] operation_timeout;
     reg [31:0] active_lba;
+    reg        read_stop_error;
+    reg [7:0]  read_stop_error_code;
 
     wire [31:0] csd_capacity_blocks =
         ({10'd0, response_long[69:48]} + 32'd1) << 10;
@@ -215,8 +217,10 @@ module sd_native_block_device (
             settle_clock_count <= 8'd0;
             operation_timeout <= 32'd0;
             active_lba <= 32'd0;
-            active_block_count <= 4'd1;
-            active_block_index <= 4'd0;
+            active_block_count <= 6'd1;
+            active_block_index <= 6'd0;
+            read_stop_error <= 1'b0;
+            read_stop_error_code <= 8'd0;
         end else begin
             case (state)
                 S_POWER: if (sd_rise) begin
@@ -399,21 +403,23 @@ module sd_native_block_device (
                     if ((read_request || write_request) &&
                         (request_lba >= capacity_blocks ||
                          request_block_count == 0 ||
-                         {28'd0, request_block_count} >
+                         {26'd0, request_block_count} >
                              capacity_blocks - request_lba)) begin
                         fail(E_RANGE);
                     end else if (read_request) begin
                         active_lba <= request_lba;
                         active_block_count <= request_block_count;
-                        active_block_index <= 4'd0;
+                        active_block_index <= 6'd0;
                         operation_busy <= 1'b1;
                         read_ready <= 1'b0;
+                        read_stop_error <= 1'b0;
+                        read_stop_error_code <= 8'd0;
                         data_rx_enable <= 1'b1;
                         state <= S_READ_CMD_START;
                     end else if (write_request) begin
                         active_lba <= request_lba;
                         active_block_count <= request_block_count;
-                        active_block_index <= 4'd0;
+                        active_block_index <= 6'd0;
                         operation_busy <= 1'b1;
                         read_ready <= 1'b0;
                         if (request_block_count > 1)
@@ -424,29 +430,80 @@ module sd_native_block_device (
                 end
 
                 S_READ_CMD_START: if (!command_busy) begin
-                    command_index <= 6'd17;
-                    command_argument <= card_address(
-                        active_lba + active_block_index);
+                    command_index <= active_block_count > 1 ?
+                        6'd18 : 6'd17;
+                    command_argument <= card_address(active_lba);
                     command_response_kind <= 2'd1;
                     command_start <= 1'b1;
                     operation_timeout <= 32'd0;
                     state <= S_READ_CMD_WAIT;
                 end
                 S_READ_CMD_WAIT: if (command_done) begin
-                    if (command_timeout) fail(E_CMD17);
+                    if (command_timeout)
+                        fail(active_block_count > 1 ? E_CMD18 : E_CMD17);
                     else state <= S_READ_DATA;
                 end
                 S_READ_DATA: begin
                     if (block_done) begin
-                        if (block_crc_error)
-                            fail(E_READ_DATA);
-                        else if (active_block_index + 4'd1 <
-                                 active_block_count) begin
-                            active_block_index <= active_block_index + 4'd1;
-                            state <= S_READ_CMD_START;
+                        operation_timeout <= 32'd0;
+                        if (block_crc_error) begin
+                            if (active_block_count > 1) begin
+                                data_rx_enable <= 1'b0;
+                                read_stop_error <= 1'b1;
+                                read_stop_error_code <= E_READ_DATA;
+                                state <= S_READ_STOP_START;
+                            end else begin
+                                fail(E_READ_DATA);
+                            end
                         end
-                        else begin
+                        else if (active_block_index + 6'd1 <
+                                 active_block_count) begin
+                            active_block_index <= active_block_index + 6'd1;
+                        end
+                        else if (active_block_count > 1) begin
                             data_rx_enable <= 1'b0;
+                            read_stop_error <= 1'b0;
+                            state <= S_READ_STOP_START;
+                        end else begin
+                            data_rx_enable <= 1'b0;
+                            operation_busy <= 1'b0;
+                            read_ready <= 1'b1;
+                            state <= S_IDLE;
+                        end
+                    end else if (operation_timeout == 32'h0fff_ffff) begin
+                        if (active_block_count > 1) begin
+                            data_rx_enable <= 1'b0;
+                            read_stop_error <= 1'b1;
+                            read_stop_error_code <= E_TIMEOUT;
+                            operation_timeout <= 32'd0;
+                            state <= S_READ_STOP_START;
+                        end else begin
+                            fail(E_TIMEOUT);
+                        end
+                    end else begin
+                        operation_timeout <= operation_timeout + 32'd1;
+                    end
+                end
+
+                S_READ_STOP_START: if (!command_busy) begin
+                    command_index <= 6'd12;
+                    command_argument <= 32'd0;
+                    command_response_kind <= 2'd1;
+                    command_start <= 1'b1;
+                    operation_timeout <= 32'd0;
+                    state <= S_READ_STOP_WAIT;
+                end
+                S_READ_STOP_WAIT: if (command_done) begin
+                    if (command_timeout)
+                        fail(E_CMD12);
+                    else
+                        state <= S_READ_STOP_BUSY;
+                end
+                S_READ_STOP_BUSY: begin
+                    if (sd_dat_in[0]) begin
+                        if (read_stop_error) begin
+                            fail(read_stop_error_code);
+                        end else begin
                             operation_busy <= 1'b0;
                             read_ready <= 1'b1;
                             state <= S_IDLE;
@@ -471,7 +528,7 @@ module sd_native_block_device (
                 end
                 S_ACMD23_START: if (!command_busy) begin
                     command_index <= 6'd23;
-                    command_argument <= {28'd0, active_block_count};
+                    command_argument <= {26'd0, active_block_count};
                     command_response_kind <= 2'd1;
                     command_start <= 1'b1;
                     state <= S_ACMD23_WAIT;
@@ -500,9 +557,9 @@ module sd_native_block_device (
                 S_WRITE_DATA_WAIT: if (data_tx_done) begin
                     if (data_tx_response_error || !data_tx_accepted)
                         fail(E_WRITE_DATA);
-                    else if (active_block_index + 4'd1 <
+                    else if (active_block_index + 6'd1 <
                              active_block_count) begin
-                        active_block_index <= active_block_index + 4'd1;
+                        active_block_index <= active_block_index + 6'd1;
                         state <= S_WRITE_DATA_START;
                     end else if (active_block_count > 1) begin
                         state <= S_WRITE_STOP_START;
