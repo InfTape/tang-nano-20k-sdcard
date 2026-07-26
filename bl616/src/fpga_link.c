@@ -26,6 +26,9 @@
 #define LINK_CMD_READ_DATA   0x04
 #define LINK_CMD_WRITE_DATA  0x05
 
+#define LINK_READ_STATUS_TIMEOUT_US   1000000u
+#define LINK_WRITE_STATUS_TIMEOUT_US  5000000u
+
 #ifndef FPGA_LINK_USE_HW_SPI
 #define FPGA_LINK_USE_HW_SPI 1
 #endif
@@ -356,8 +359,11 @@ static int wait_for_status(uint8_t wanted, uint8_t diagnostic_stage)
     uint8_t payload[8];
     uint8_t status = 0xff;
     uint16_t length;
+    uint32_t timeout_us = diagnostic_stage == 4 ?
+        LINK_WRITE_STATUS_TIMEOUT_US : LINK_READ_STATUS_TIMEOUT_US;
+    uint64_t deadline = bflb_mtimer_get_time_us() + timeout_us;
 
-    for (unsigned retry = 0; retry < 500; retry++) {
+    do {
         if (exchange(LINK_CMD_STATUS, 0, NULL, 0, payload,
                      sizeof(payload), &status, &length) == 0) {
             if (status == wanted)
@@ -368,7 +374,20 @@ static int wait_for_status(uint8_t wanted, uint8_t diagnostic_stage)
                 return -1;
             }
         }
-    }
+
+        /*
+         * A multi-block SD write can stay busy for hundreds of milliseconds
+         * while the card erases or folds flash pages.  Yield between write
+         * polls so the USB stack remains responsive.  Reads normally finish
+         * in a few milliseconds and retain fine-grained polling.
+         */
+        if (diagnostic_stage == 4 &&
+            xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+            vTaskDelay(pdMS_TO_TICKS(1));
+        else
+            bflb_mtimer_delay_us(50);
+    } while (bflb_mtimer_get_time_us() < deadline);
+
     last_diagnostic = ((uint32_t)diagnostic_stage << 16) |
                       ((uint32_t)status << 8) | last_exchange_error;
     return -2;
