@@ -102,6 +102,17 @@ try {
             "sim\tb_sd_native_block_device_read_batch.sv"
         )
 
+    Invoke-VerilogTest -Top "tb_sd_native_block_device_write_batch" `
+        -Output "sim\sd_native_block_device_write_batch.vvp" `
+        -Sources @(
+            "src\sd_native_clock.v",
+            "src\sd_native_command.v",
+            "src\sd_native_data_rx.v",
+            "src\sd_native_data_tx.v",
+            "src\sd_native_block_device.v",
+            "sim\tb_sd_native_block_device_write_batch.sv"
+        )
+
     & $Iverilog -g2005-sv -Wall -s sd_native_block_device `
         -o "sim\sd_native_block_device_compile.vvp" `
         "src\sd_native_clock.v" `

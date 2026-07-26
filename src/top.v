@@ -100,7 +100,7 @@ module top (
     );
 
     fpga_sclk_block_bridge #(
-        .ALLOW_WRITES(1'b0)
+        .ALLOW_WRITES(1'b1)
     ) bridge_i (
         .clk(system_clk), .rst(rst),
         .spi_csn(spi_csn), .spi_sclk(spi_sclk_global),

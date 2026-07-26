@@ -215,6 +215,8 @@ module fpga_sclk_block_bridge #(
 
     wire any_read_ready = bank0_state == 2'd2 ||
                           bank1_state == 2'd2;
+    wire any_read_free = bank0_state == 2'd0 ||
+                         bank1_state == 2'd0;
     wire [31:0] fill_crc_next = read_buffer_we ?
         crc32_update(fill_crc_work, read_buffer_data) : fill_crc_work;
 
@@ -396,7 +398,7 @@ module fpga_sclk_block_bridge #(
                             end else if (card_error) begin
                                 queue_empty_response(STATUS_IO_ERROR);
                             end else if (card_busy || read_inflight ||
-                                         any_read_ready) begin
+                                         !any_read_free) begin
                                 queue_empty_response(STATUS_BUSY);
                             end else begin
                                 pending_lba <= sys_request_lba;
@@ -418,10 +420,11 @@ module fpga_sclk_block_bridge #(
                                 queue_empty_response(STATUS_BAD_REQUEST);
                             end else if (card_error) begin
                                 queue_empty_response(STATUS_IO_ERROR);
-                            end else if (card_busy || read_inflight) begin
-                                queue_empty_response(STATUS_BUSY);
                             end else if (!any_read_ready) begin
-                                queue_empty_response(STATUS_NOT_READY);
+                                if (card_busy || read_inflight)
+                                    queue_empty_response(STATUS_BUSY);
+                                else
+                                    queue_empty_response(STATUS_NOT_READY);
                             end else begin
                                 acquire_sent <= 1'b0;
                                 control_state <=
@@ -440,7 +443,8 @@ module fpga_sclk_block_bridge #(
                                 queue_empty_response(STATUS_NOT_READY);
                             end else if (card_error) begin
                                 queue_empty_response(STATUS_IO_ERROR);
-                            end else if (card_busy) begin
+                            end else if (card_busy || read_inflight ||
+                                         any_read_ready) begin
                                 queue_empty_response(STATUS_BUSY);
                             end else begin
                                 request_lba <= sys_request_lba;

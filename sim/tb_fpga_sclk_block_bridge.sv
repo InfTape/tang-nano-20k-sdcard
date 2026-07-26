@@ -24,10 +24,12 @@ module tb_fpga_sclk_block_bridge;
     wire [5:0] request_block_count;
     reg model_read_active = 0;
     reg [13:0] model_read_index = 0;
+    reg [7:0] model_read_seed = 0;
     wire read_buffer_we = model_read_active;
     wire [13:0] read_buffer_addr = model_read_index;
     wire [7:0] read_buffer_data =
-        model_read_index[7:0] ^ {2'd0, model_read_index[13:8]} ^ 8'h5a;
+        model_read_index[7:0] ^ {2'd0, model_read_index[13:8]} ^
+        8'h5a ^ model_read_seed;
     reg [13:0] write_buffer_addr = 0;
     wire [7:0] write_buffer_data;
 
@@ -37,6 +39,9 @@ module tb_fpga_sclk_block_bridge;
     wire debug_response_seen;
 
     integer read_request_count = 0;
+    integer write_request_count = 0;
+    reg [31:0] captured_write_lba;
+    reg [5:0] captured_write_blocks;
     integer i;
     integer scan;
     reg [7:0] rx_byte;
@@ -73,6 +78,7 @@ module tb_fpga_sclk_block_bridge;
             read_request_count <= read_request_count + 1;
             model_read_active <= 1;
             model_read_index <= 0;
+            model_read_seed <= request_lba[7:0];
             card_busy <= 1;
             card_read_ready <= 0;
         end else if (model_read_active) begin
@@ -83,6 +89,11 @@ module tb_fpga_sclk_block_bridge;
             end else begin
                 model_read_index <= model_read_index + 14'd1;
             end
+        end
+        if (write_request) begin
+            write_request_count <= write_request_count + 1;
+            captured_write_lba <= request_lba;
+            captured_write_blocks <= request_block_count;
         end
     end
 
@@ -248,7 +259,19 @@ module tb_fpga_sclk_block_bridge;
         end
         finish_transaction();
 
-        // READ_DATA transfers bank ownership to the SCLK consumer.
+        // Queue a second SD read into the free bank before consuming the
+        // first. Its fill must overlap the first bank's SPI transfer.
+        send_header(8'h03, 32'h0001_20a5, 16'd1024);
+        receive_header();
+        if (response_status != 0 || response_length != 0) begin
+            $display("FAIL: overlapped READ_START status=%0d len=%0d",
+                     response_status, response_length);
+            $fatal;
+        end
+        finish_transaction();
+
+        // READ_DATA transfers bank ownership to the SCLK consumer even while
+        // the SD controller is filling the other bank.
         send_header(8'h04, 32'd0, 16'd0);
         receive_header();
         if (response_status != 0 || response_length != 1024) begin
@@ -279,18 +302,93 @@ module tb_fpga_sclk_block_bridge;
         spi_csn = 1;
         #500;
 
+        wait (card_read_ready);
+        repeat (8) @(posedge clk);
+        spi_csn = 0;
+        send_header(8'h04, 32'd0, 16'd0);
+        receive_header();
+        if (response_status != 0 || response_length != 1024) begin
+            $display("FAIL: second READ_DATA status=%0d len=%0d",
+                     response_status, response_length);
+            $fatal;
+        end
+        crc = 32'hffff_ffff;
+        for (i = 0; i < 1024; i = i + 1) begin
+            spi_transfer_byte(8'hff, rx_byte);
+            if (rx_byte !=
+                (i[7:0] ^ {2'd0, i[13:8]} ^ 8'h5a ^ 8'ha5)) begin
+                $display("FAIL: second READ_DATA[%0d]=%02x", i, rx_byte);
+                $fatal;
+            end
+            crc = crc32_byte(crc, rx_byte);
+        end
+        received_crc = 0;
+        for (i = 0; i < 4; i = i + 1) begin
+            spi_transfer_byte(8'hff, rx_byte);
+            received_crc = received_crc | (rx_byte << (8 * i));
+        end
+        if (received_crc != (crc ^ 32'hffff_ffff)) begin
+            $display("FAIL: second READ_DATA CRC");
+            $fatal;
+        end
+        spi_csn = 1;
+        #500;
+
         if (dut.bank0_state != 2'd0 || dut.bank1_state != 2'd0) begin
             $display("FAIL: buffer ownership not released bank0=%0d bank1=%0d",
                      dut.bank0_state, dut.bank1_state);
             $fatal;
         end
+
+        // The SCLK request payload must cross through the 16 KiB write RAM
+        // before the system domain pulses write_request.
+        spi_csn = 0;
+        send_header(8'h05, 32'h0004_0000, 16'd512);
+        crc = 32'hffff_ffff;
+        for (i = 0; i < 512; i = i + 1) begin
+            rx_byte = i[7:0] ^ 8'hc3;
+            crc = crc32_byte(crc, rx_byte);
+            spi_transfer_byte(rx_byte, response_check);
+        end
+        crc = crc ^ 32'hffff_ffff;
+        for (i = 0; i < 4; i = i + 1)
+            spi_transfer_byte(crc >> (8 * i), response_check);
+        receive_header();
+        if (response_status != 0 || response_length != 0) begin
+            $display("FAIL: WRITE_DATA status=%0d len=%0d",
+                     response_status, response_length);
+            $fatal;
+        end
+        finish_transaction();
+        repeat (4) @(posedge clk);
+        if (write_request_count != 1 ||
+            captured_write_lba != 32'h0004_0000 ||
+            captured_write_blocks != 6'd1) begin
+            $display("FAIL: write request count=%0d lba=%08x blocks=%0d",
+                     write_request_count, captured_write_lba,
+                     captured_write_blocks);
+            $fatal;
+        end
+        for (i = 0; i < 512; i = i + 1) begin
+            @(negedge clk);
+            write_buffer_addr = i[13:0];
+            @(posedge clk);
+            #1;
+            if (write_buffer_data != (i[7:0] ^ 8'hc3)) begin
+                $display("FAIL: write RAM[%0d]=%02x",
+                         i, write_buffer_data);
+                $fatal;
+            end
+        end
+        spi_csn = 1;
+
         if (!debug_cs_seen || !debug_sclk_seen ||
             !debug_request_seen || !debug_response_seen) begin
             $display("FAIL: debug markers were not all observed");
             $fatal;
         end
 
-        $display("PASS: SCLK bridge reads two blocks through descriptor CDC and ping-pong RAM");
+        $display("PASS: overlapped reads and SCLK-to-SD write payload");
         $finish;
     end
 
