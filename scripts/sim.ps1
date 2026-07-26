@@ -59,6 +59,13 @@ try {
             "sim\tb_fpga_spi_block_bridge.sv"
         )
 
+    Invoke-VerilogTest -Top "tb_spi_sclk_mailbox" `
+        -Output "sim\spi_sclk_mailbox.vvp" `
+        -Sources @(
+            "src\spi_sclk_mailbox.v",
+            "sim\tb_spi_sclk_mailbox.sv"
+        )
+
     Invoke-VerilogTest -Top "tb_sd_native_block_device_read_batch" `
         -Output "sim\sd_native_block_device_read_batch.vvp" `
         -Sources @(
