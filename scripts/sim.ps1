@@ -52,6 +52,13 @@ try {
             "sim\tb_sd_native_data_tx.sv"
         )
 
+    Invoke-VerilogTest -Top "tb_sd_native_data_rx_multiblock" `
+        -Output "sim\sd_native_data_rx_multiblock.vvp" `
+        -Sources @(
+            "src\sd_native_data_rx.v",
+            "sim\tb_sd_native_data_rx_multiblock.sv"
+        )
+
     Invoke-VerilogTest -Top "tb_fpga_spi_block_bridge" `
         -Output "sim\fpga_spi_block_bridge.vvp" `
         -Sources @(
