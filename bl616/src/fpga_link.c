@@ -442,7 +442,7 @@ int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
     uint16_t length = 0;
     uint16_t transfer_length;
 
-    if (block_count == 0 || block_count > 8)
+    if (block_count == 0 || block_count > 32)
         return -1;
     transfer_length = (uint16_t)block_count * 512u;
     last_diagnostic = 0;
@@ -475,7 +475,7 @@ int fpga_link_write_blocks(uint32_t lba, const uint8_t *data,
     uint8_t status;
     uint16_t length;
 
-    if (block_count == 0 || block_count > 8)
+    if (block_count == 0 || block_count > 32)
         return -1;
     if (exchange(LINK_CMD_WRITE_DATA, lba, data,
                  (uint16_t)block_count * 512u, NULL, 0,
