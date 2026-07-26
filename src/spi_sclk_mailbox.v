@@ -146,7 +146,7 @@ module spi_sclk_mailbox #(
         response_toggle_sync2 != response_toggle_seen_sclk;
     wire load_response = !spi_csn && !tx_active &&
                          response_available &&
-                         rx_bit_count == 3'd7;
+                         rx_bit_count == 3'd0;
 
     reg [7:0] response_status_mailbox;
     reg [15:0] response_length_mailbox;
@@ -175,7 +175,6 @@ module spi_sclk_mailbox #(
             request_has_payload_mailbox <= 1'b0;
             request_crc_ok_mailbox <= 1'b0;
             request_toggle_sclk <= 1'b0;
-            response_toggle_seen_sclk <= 1'b0;
         end else begin
             if (commit_request) begin
                 request_command_mailbox <= request_command_sclk;
@@ -185,9 +184,14 @@ module spi_sclk_mailbox #(
                 request_crc_ok_mailbox <= committed_crc_ok;
                 request_toggle_sclk <= ~request_toggle_sclk;
             end
-            if (load_response)
-                response_toggle_seen_sclk <= response_toggle_sync2;
         end
+    end
+
+    always @(negedge spi_sclk or posedge sys_rst) begin
+        if (sys_rst)
+            response_toggle_seen_sclk <= 1'b0;
+        else if (load_response)
+            response_toggle_seen_sclk <= response_toggle_sync2;
     end
 
     always @(posedge spi_sclk or posedge spi_csn or posedge sys_rst) begin
@@ -376,10 +380,11 @@ module spi_sclk_mailbox #(
     /*
      * Response shifter: spi_sclk domain.
      *
-     * MISO changes immediately after the rising edge at which the preceding
-     * bit was sampled, leaving nearly one full SCLK period of setup time for
-     * the next rising edge. Response payload addresses run one byte ahead so a
-     * synchronous BSRAM read port can prefetch the next payload byte.
+     * The master and slave sample on rising edges. MISO changes only after
+     * falling edges, providing half a period of setup and half a period of
+     * hold around every sampling edge. Response payload addresses run one
+     * byte ahead so the positive-edge BSRAM port can prefetch each byte before
+     * the falling edge that presents it.
      */
     reg tx_active;
     reg [2:0] tx_bit_count;
@@ -462,7 +467,7 @@ module spi_sclk_mailbox #(
     assign spi_miso = (!spi_csn && tx_active) ?
                       tx_shift[3'd7 - tx_bit_count] : 1'b1;
 
-    always @(posedge spi_sclk or posedge spi_csn or posedge sys_rst) begin
+    always @(negedge spi_sclk or posedge spi_csn or posedge sys_rst) begin
         if (sys_rst || spi_csn) begin
             tx_active <= 1'b0;
             tx_bit_count <= 3'd0;
@@ -506,7 +511,7 @@ module spi_sclk_mailbox #(
         end
     end
 
-    always @(posedge spi_sclk or posedge sys_rst) begin
+    always @(negedge spi_sclk or posedge sys_rst) begin
         if (sys_rst) begin
             response_done_toggle_sclk <= 1'b0;
         end else if (tx_active && tx_bit_count == 3'd7 &&

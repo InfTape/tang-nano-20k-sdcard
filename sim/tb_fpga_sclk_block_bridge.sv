@@ -105,15 +105,22 @@ module tb_fpga_sclk_block_bridge;
         input [7:0] value;
         output [7:0] received;
         integer bit_index;
+        reg sampled_miso;
         begin
             received = 0;
             for (bit_index = 7; bit_index >= 0;
                  bit_index = bit_index - 1) begin
                 spi_mosi = value[bit_index];
                 #25;
-                received = {received[6:0], spi_miso};
+                sampled_miso = spi_miso;
+                received = {received[6:0], sampled_miso};
                 spi_sclk = 1;
-                #25;
+                #1;
+                if (spi_miso != sampled_miso) begin
+                    $display("FAIL: MISO changed inside rising-edge hold window");
+                    $fatal;
+                end
+                #24;
                 spi_sclk = 0;
             end
         end

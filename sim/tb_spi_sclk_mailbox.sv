@@ -96,22 +96,29 @@ module tb_spi_sclk_mailbox;
     endfunction
 
     /*
-     * 20 MHz SPI mode 0. Sample MISO immediately before the rising edge; the
-     * DUT advances it just after that edge for the following bit.
+     * 20 MHz SPI mode 0. The DUT changes MISO after falling edges and the
+     * master samples it at rising edges.
      */
     task spi_transfer_byte;
         input [7:0] value;
         output [7:0] received;
         integer bit_index;
+        reg sampled_miso;
         begin
             received = 0;
             for (bit_index = 7; bit_index >= 0;
                  bit_index = bit_index - 1) begin
                 spi_mosi = value[bit_index];
                 #25;
-                received = {received[6:0], spi_miso};
+                sampled_miso = spi_miso;
+                received = {received[6:0], sampled_miso};
                 spi_sclk = 1;
-                #25;
+                #1;
+                if (spi_miso != sampled_miso) begin
+                    $display("FAIL: MISO changed inside rising-edge hold window");
+                    $fatal;
+                end
+                #24;
                 spi_sclk = 0;
             end
         end
