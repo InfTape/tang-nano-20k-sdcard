@@ -16,6 +16,7 @@ bl616/build/
 bl616/build*/
 backup/
 tmp/
+database/
 *.bin
 *.zip
 *.tar.zst
