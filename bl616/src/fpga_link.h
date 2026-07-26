@@ -16,6 +16,8 @@ enum fpga_link_status {
 void fpga_link_init(void);
 int fpga_link_get_capacity(uint32_t *block_count);
 int fpga_link_read_sector(uint32_t lba, uint8_t *data);
+int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
+                          uint8_t block_count);
 int fpga_link_write_sector(uint32_t lba, const uint8_t *data);
 int fpga_link_write_blocks(uint32_t lba, const uint8_t *data,
                            uint8_t block_count);

@@ -3,12 +3,14 @@
  *
  * Tang Nano 20K v3923 private link:
  * GPIO0 CS (board net SPI_DIR), GPIO1 SCLK, GPIO27 MOSI, GPIO30 MISO.
- * The BL616 is a mode-0 bit-banged master.
+ * The BL616 is a mode-0 SPI0 master with software-controlled chip select.
  */
 #include <stdbool.h>
 #include <stddef.h>
 
 #include "bflb_gpio.h"
+#include "bflb_mtimer.h"
+#include "bflb_spi.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
@@ -24,9 +26,22 @@
 #define LINK_CMD_READ_DATA   0x04
 #define LINK_CMD_WRITE_DATA  0x05
 
+#ifndef FPGA_LINK_USE_HW_SPI
+#define FPGA_LINK_USE_HW_SPI 1
+#endif
+
+#ifndef FPGA_LINK_SPI_FREQUENCY
+#define FPGA_LINK_SPI_FREQUENCY 4000000u
+#endif
+
+#if FPGA_LINK_USE_HW_SPI
+#define LINK_SHORT_RESPONSE_WAIT_US       5u
+#define LINK_BLOCK_RESPONSE_WAIT_US      35u
+#define LINK_SPI_IDLE_TIMEOUT_US       20000u
+#else
 #define LINK_DELAY_ITERATIONS          8u
 #define LINK_SHORT_RESPONSE_WAIT     256u
-#define LINK_BLOCK_RESPONSE_WAIT    3000u
+#define LINK_BLOCK_RESPONSE_WAIT_PER_SECTOR 5000u
 
 #define GPIO_SET   (1u << 25)
 #define GPIO_CLEAR (1u << 26)
@@ -36,12 +51,66 @@ static volatile uint32_t *const reg_cs   = (volatile uint32_t *)0x200008c4;
 static volatile uint32_t *const reg_clk  = (volatile uint32_t *)0x200008c8;
 static volatile uint32_t *const reg_mosi = (volatile uint32_t *)0x20000930;
 static volatile uint32_t *const reg_miso = (volatile uint32_t *)0x2000093c;
+#endif
 
 static struct bflb_device_s *gpio;
+#if FPGA_LINK_USE_HW_SPI
+static struct bflb_device_s *spi0;
+#endif
 static SemaphoreHandle_t link_mutex;
 static volatile uint8_t last_exchange_error;
 static volatile uint32_t last_diagnostic;
 
+#if FPGA_LINK_USE_HW_SPI
+static int wait_spi_idle(void)
+{
+    uint64_t deadline =
+        bflb_mtimer_get_time_us() + LINK_SPI_IDLE_TIMEOUT_US;
+
+    while (bflb_spi_isbusy(spi0)) {
+        if (bflb_mtimer_get_time_us() >= deadline)
+            return -1;
+    }
+    return 0;
+}
+
+static uint8_t transfer_byte(uint8_t value)
+{
+    return (uint8_t)bflb_spi_poll_send(spi0, value);
+}
+
+static int transfer_buffer(const uint8_t *tx_data, uint8_t *rx_data,
+                           size_t length)
+{
+    return bflb_spi_poll_exchange(spi0, tx_data, rx_data, length);
+}
+
+static int link_begin(void)
+{
+    if (wait_spi_idle())
+        return -1;
+    bflb_gpio_reset(gpio, GPIO_PIN_0);
+    bflb_mtimer_delay_us(1);
+    return 0;
+}
+
+static int link_end(void)
+{
+    int result = wait_spi_idle();
+    bflb_gpio_set(gpio, GPIO_PIN_0);
+    return result;
+}
+
+static void wait_for_response(uint16_t rx_capacity)
+{
+    if (rx_capacity >= 512) {
+        unsigned sectors = (unsigned)rx_capacity / 512u;
+        bflb_mtimer_delay_us(sectors * LINK_BLOCK_RESPONSE_WAIT_US);
+    } else {
+        bflb_mtimer_delay_us(LINK_SHORT_RESPONSE_WAIT_US);
+    }
+}
+#else
 /*
  * The FPGA samples this link at 48 MHz through a three-stage synchronizer.
  * Eight volatile loop iterations plus the GPIO bus accesses leave ample
@@ -78,6 +147,45 @@ static uint8_t transfer_byte(uint8_t value)
     return received;
 }
 
+static int transfer_buffer(const uint8_t *tx_data, uint8_t *rx_data,
+                           size_t length)
+{
+    for (size_t i = 0; i < length; i++) {
+        uint8_t received = transfer_byte(tx_data ? tx_data[i] : 0xff);
+        if (rx_data)
+            rx_data[i] = received;
+    }
+    return 0;
+}
+
+static int link_begin(void)
+{
+    *reg_clk |= GPIO_CLEAR;
+    *reg_cs |= GPIO_CLEAR;
+    *reg_mosi |= GPIO_SET;
+    link_delay();
+    return 0;
+}
+
+static int link_end(void)
+{
+    *reg_cs |= GPIO_SET;
+    *reg_clk |= GPIO_CLEAR;
+    *reg_mosi |= GPIO_SET;
+    return 0;
+}
+
+static void wait_for_response(uint16_t rx_capacity)
+{
+    unsigned response_wait = rx_capacity >= 512 ?
+        ((unsigned)rx_capacity / 512u) *
+            LINK_BLOCK_RESPONSE_WAIT_PER_SECTOR :
+        LINK_SHORT_RESPONSE_WAIT;
+    for (volatile unsigned i = 0; i < response_wait; i++)
+        __asm__ volatile("nop");
+}
+#endif
+
 static uint32_t crc32_update(uint32_t crc, uint8_t value)
 {
     crc ^= value;
@@ -101,7 +209,7 @@ static void store_le32(uint8_t *p, uint32_t value)
 }
 
 static int exchange(uint8_t command, uint32_t lba,
-                    const uint8_t *tx_data, uint16_t tx_len,
+                    const uint8_t *tx_data, uint16_t request_length,
                     uint8_t *rx_data, uint16_t rx_capacity,
                     uint8_t *response_status, uint16_t *response_len)
 {
@@ -109,7 +217,9 @@ static int exchange(uint8_t command, uint32_t lba,
     uint8_t response[5];
     uint8_t check = 0;
     uint32_t crc = 0xffffffffu;
+#if !FPGA_LINK_USE_HW_SPI
     uint8_t response_scan = 0xff;
+#endif
     unsigned found = 0;
     bool mutex_locked = false;
     int result = -2;
@@ -130,44 +240,52 @@ static int exchange(uint8_t command, uint32_t lba,
     header[0] = LINK_MAGIC_REQUEST;
     header[1] = command;
     store_le32(&header[2], lba);
-    header[6] = (uint8_t)tx_len;
-    header[7] = (uint8_t)(tx_len >> 8);
+    header[6] = (uint8_t)request_length;
+    header[7] = (uint8_t)(request_length >> 8);
     for (unsigned i = 0; i < 8; i++)
         check ^= header[i];
     header[8] = check;
 
-    *reg_clk |= GPIO_CLEAR;
-    *reg_cs |= GPIO_CLEAR;
-    *reg_mosi |= GPIO_SET;
-    link_delay();
-
-    for (unsigned i = 0; i < sizeof(header); i++)
-        transfer_byte(header[i]);
-    for (unsigned i = 0; i < tx_len; i++) {
-        transfer_byte(tx_data[i]);
-        crc = crc32_update(crc, tx_data[i]);
+    if (link_begin()) {
+        last_exchange_error = 5;
+        goto done;
     }
-    if (tx_len) {
+    if (transfer_buffer(header, NULL, sizeof(header))) {
+        last_exchange_error = 5;
+        goto done;
+    }
+    if (tx_data) {
+        for (unsigned i = 0; i < request_length; i++)
+            crc = crc32_update(crc, tx_data[i]);
+        if (transfer_buffer(tx_data, NULL, request_length)) {
+            last_exchange_error = 5;
+            goto done;
+        }
         crc ^= 0xffffffffu;
-        for (unsigned i = 0; i < 4; i++)
-            transfer_byte((uint8_t)(crc >> (i * 8)));
+        uint8_t crc_bytes[4];
+        store_le32(crc_bytes, crc);
+        if (transfer_buffer(crc_bytes, NULL, sizeof(crc_bytes))) {
+            last_exchange_error = 5;
+            goto done;
+        }
     }
 
-    /*
-     * A 512-byte response CRC takes 1024 FPGA clocks (about 21.4 us) to
-     * precompute. Short replies need only a few dozen clocks. The original
-     * unconditional 30000-iteration wait penalized every command and every
-     * status poll.
-     */
-    unsigned response_wait = rx_capacity >= 512 ?
-        LINK_BLOCK_RESPONSE_WAIT : LINK_SHORT_RESPONSE_WAIT;
-    for (volatile unsigned i = 0; i < response_wait; i++)
-        __asm__ volatile("nop");
+    wait_for_response(rx_capacity);
 
+    /* Clocks stop while the FPGA prepares its response. */
+#if FPGA_LINK_USE_HW_SPI
+    /* Hardware SPI must find the response on an eight-bit frame boundary. */
+    for (unsigned i = 0; i < 8; i++) {
+        response[0] = transfer_byte(0xff);
+        if (response[0] == LINK_MAGIC_RESPONSE) {
+            found = 1;
+            break;
+        }
+    }
+#else
     /*
-     * The FPGA samples SCLK through a synchronizer. Search the returned
-     * bitstream rather than assuming that its first driven bit is aligned to
-     * the first byte clocked here.
+     * The synchronized bit-bang path can start between byte boundaries, so
+     * retain its original bitwise response-magic search.
      */
     for (unsigned i = 0; i < 64; i++) {
         response_scan = (uint8_t)((response_scan << 1) | transfer_bit(1));
@@ -177,13 +295,16 @@ static int exchange(uint8_t command, uint32_t lba,
             break;
         }
     }
+#endif
     if (!found) {
         last_exchange_error = 1;
         goto done;
     }
 
-    for (unsigned i = 1; i < sizeof(response); i++)
-        response[i] = transfer_byte(0xff);
+    if (transfer_buffer(NULL, &response[1], sizeof(response) - 1)) {
+        last_exchange_error = 5;
+        goto done;
+    }
     check = response[0] ^ response[1] ^ response[2] ^ response[3];
     if (check != response[4]) {
         last_exchange_error = 2;
@@ -199,14 +320,19 @@ static int exchange(uint8_t command, uint32_t lba,
     }
 
     crc = 0xffffffffu;
-    for (unsigned i = 0; i < *response_len; i++) {
-        rx_data[i] = transfer_byte(0xff);
-        crc = crc32_update(crc, rx_data[i]);
+    if (*response_len &&
+        transfer_buffer(NULL, rx_data, *response_len)) {
+        last_exchange_error = 5;
+        goto done;
     }
+    for (unsigned i = 0; i < *response_len; i++)
+        crc = crc32_update(crc, rx_data[i]);
     if (*response_len) {
         uint8_t crc_bytes[4];
-        for (unsigned i = 0; i < 4; i++)
-            crc_bytes[i] = transfer_byte(0xff);
+        if (transfer_buffer(NULL, crc_bytes, sizeof(crc_bytes))) {
+            last_exchange_error = 5;
+            goto done;
+        }
         if ((crc ^ 0xffffffffu) != load_le32(crc_bytes)) {
             last_exchange_error = 4;
             goto done;
@@ -215,9 +341,10 @@ static int exchange(uint8_t command, uint32_t lba,
     result = 0;
 
 done:
-    *reg_cs |= GPIO_SET;
-    *reg_clk |= GPIO_CLEAR;
-    *reg_mosi |= GPIO_SET;
+    if (link_end() && result == 0) {
+        last_exchange_error = 5;
+        result = -2;
+    }
     if (mutex_locked)
         xSemaphoreGive(link_mutex);
     return result;
@@ -251,16 +378,42 @@ void fpga_link_init(void)
     gpio = bflb_device_get_by_name("gpio");
     bflb_gpio_init(gpio, GPIO_PIN_0,
                    GPIO_OUTPUT | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);
+#if FPGA_LINK_USE_HW_SPI
+    bflb_gpio_set(gpio, GPIO_PIN_0);
+    bflb_gpio_init(gpio, GPIO_PIN_1,
+                   GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLDOWN |
+                   GPIO_SMT_EN | GPIO_DRV_2);
+    bflb_gpio_init(gpio, GPIO_PIN_27,
+                   GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLUP |
+                   GPIO_SMT_EN | GPIO_DRV_2);
+    bflb_gpio_init(gpio, GPIO_PIN_30,
+                   GPIO_FUNC_SPI0 | GPIO_ALTERNATE | GPIO_PULLUP |
+                   GPIO_SMT_EN | GPIO_DRV_2);
+
+    struct bflb_spi_config_s spi_config = {
+        .freq = FPGA_LINK_SPI_FREQUENCY,
+        .role = SPI_ROLE_MASTER,
+        .mode = SPI_MODE0,
+        .data_width = SPI_DATA_WIDTH_8BIT,
+        .bit_order = SPI_BIT_MSB,
+        .byte_order = SPI_BYTE_LSB,
+        .tx_fifo_threshold = 0,
+        .rx_fifo_threshold = 0,
+    };
+    spi0 = bflb_device_get_by_name("spi0");
+    bflb_spi_init(spi0, &spi_config);
+    bflb_spi_feature_control(spi0, SPI_CMD_SET_CS_INTERVAL, true);
+#else
     bflb_gpio_init(gpio, GPIO_PIN_1,
                    GPIO_OUTPUT | GPIO_PULLDOWN | GPIO_SMT_EN | GPIO_DRV_2);
     bflb_gpio_init(gpio, GPIO_PIN_27,
                    GPIO_OUTPUT | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);
     bflb_gpio_init(gpio, GPIO_PIN_30,
                    GPIO_INPUT | GPIO_PULLUP | GPIO_SMT_EN | GPIO_DRV_2);
-
     *reg_cs |= GPIO_SET;
     *reg_clk |= GPIO_CLEAR;
     *reg_mosi |= GPIO_SET;
+#endif
     link_mutex = xSemaphoreCreateMutex();
 }
 
@@ -279,11 +432,21 @@ int fpga_link_get_capacity(uint32_t *block_count)
 
 int fpga_link_read_sector(uint32_t lba, uint8_t *data)
 {
+    return fpga_link_read_blocks(lba, data, 1);
+}
+
+int fpga_link_read_blocks(uint32_t lba, uint8_t *data,
+                          uint8_t block_count)
+{
     uint8_t status = 0xff;
     uint16_t length = 0;
+    uint16_t transfer_length;
 
+    if (block_count == 0 || block_count > 8)
+        return -1;
+    transfer_length = (uint16_t)block_count * 512u;
     last_diagnostic = 0;
-    if (exchange(LINK_CMD_READ_START, lba, NULL, 0, NULL, 0,
+    if (exchange(LINK_CMD_READ_START, lba, NULL, transfer_length, NULL, 0,
                  &status, &length) || status != FPGA_STATUS_OK) {
         last_diagnostic = (1u << 16) | ((uint32_t)status << 8) |
                           last_exchange_error;
@@ -291,9 +454,9 @@ int fpga_link_read_sector(uint32_t lba, uint8_t *data)
     }
     if (wait_for_status(FPGA_STATUS_READ_READY, 2))
         return -2;
-    if (exchange(LINK_CMD_READ_DATA, 0, NULL, 0, data, 512,
+    if (exchange(LINK_CMD_READ_DATA, 0, NULL, 0, data, transfer_length,
                  &status, &length) || status != FPGA_STATUS_OK ||
-        length != 512) {
+        length != transfer_length) {
         last_diagnostic = (3u << 16) | ((uint32_t)status << 8) |
                           last_exchange_error;
         return -3;

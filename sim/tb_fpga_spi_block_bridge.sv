@@ -22,9 +22,9 @@ module tb_fpga_spi_block_bridge;
     wire write_request;
     wire [31:0] request_lba;
     wire [3:0] request_block_count;
-    wire [8:0] buffer_addr;
-    reg [7:0] memory [0:511];
-    wire [7:0] buffer_rdata = memory[buffer_addr];
+    wire [11:0] buffer_addr;
+    reg [7:0] memory [0:4095];
+    reg [7:0] buffer_rdata;
     reg [11:0] write_buffer_addr = 0;
     wire [7:0] write_buffer_data;
 
@@ -34,9 +34,11 @@ module tb_fpga_spi_block_bridge;
     reg [3:0] captured_block_count;
 
     always @(posedge clk) begin
+        buffer_rdata <= memory[buffer_addr];
         if (read_request) begin
             read_pulses <= read_pulses + 1;
             captured_lba <= request_lba;
+            captured_block_count <= request_block_count;
         end
         if (write_request) begin
             write_pulses <= write_pulses + 1;
@@ -139,7 +141,7 @@ module tb_fpga_spi_block_bridge;
         reg [7:0] check;
         integer scan;
         begin
-            #15000;
+            #150000;
             value = 0;
             scan = 0;
             while (value != 8'h5a && scan < 8) begin
@@ -179,8 +181,8 @@ module tb_fpga_spi_block_bridge;
     reg [31:0] received_crc;
 
     initial begin
-        for (i = 0; i < 512; i = i + 1)
-            memory[i] = i[7:0] ^ 8'ha5;
+        for (i = 0; i < 4096; i = i + 1)
+            memory[i] = i[7:0] ^ i[11:8] ^ 8'ha5;
 
         #100;
         rst = 0;
@@ -215,30 +217,40 @@ module tb_fpga_spi_block_bridge;
         end
         end_request();
 
-        // READ_START creates exactly one request pulse and preserves the LBA.
-        begin_request(8'h03, 32'h0012_3456, 0);
+        // READ_START rejects non-sector-aligned transfer lengths.
+        begin_request(8'h03, 32'h0012_3456, 16'd513);
         receive_header(status, length);
         end_request();
-        if (status != 0 || length != 0 || read_pulses != 1 ||
-            captured_lba != 32'h0012_3456) begin
-            $display("FAIL: READ_START");
+        if (status != 4 || length != 0 || read_pulses != 0) begin
+            $display("FAIL: invalid READ_START length");
             $fatal;
         end
 
-        // READ_DATA returns the complete buffer with transport CRC32.
+        // A 4 KiB READ_START creates one eight-block request pulse.
+        begin_request(8'h03, 32'h0012_3456, 16'd4096);
+        receive_header(status, length);
+        end_request();
+        if (status != 0 || length != 0 || read_pulses != 1 ||
+            captured_lba != 32'h0012_3456 ||
+            captured_block_count != 8) begin
+            $display("FAIL: 4 KiB READ_START");
+            $fatal;
+        end
+
+        // READ_DATA returns all eight blocks with one transport CRC32.
         card_read_ready = 1;
         begin_request(8'h04, 0, 0);
         receive_header(status, length);
-        if (status != 0 || length != 512) begin
+        if (status != 0 || length != 4096) begin
             $display("FAIL: READ_DATA header");
             $fatal;
         end
         crc = 32'hffff_ffff;
-        for (i = 0; i < 512; i = i + 1) begin
+        for (i = 0; i < 4096; i = i + 1) begin
             spi_receive_byte(value);
-            if (value != (i[7:0] ^ 8'ha5)) begin
+            if (value != (i[7:0] ^ i[11:8] ^ 8'ha5)) begin
                 $display("FAIL: READ_DATA byte %0d got=%02x expected=%02x",
-                         i, value, (i[7:0] ^ 8'ha5));
+                         i, value, (i[7:0] ^ i[11:8] ^ 8'ha5));
                 $fatal;
             end
             crc = crc32_byte(crc, value);
@@ -318,7 +330,7 @@ module tb_fpga_spi_block_bridge;
             end
         end
 
-        $display("PASS: BL616 link INFO/READ/512B+4KiB WRITE and CRC32");
+        $display("PASS: BL616 link INFO/4KiB READ/512B+4KiB WRITE and CRC32");
         $finish;
     end
 endmodule

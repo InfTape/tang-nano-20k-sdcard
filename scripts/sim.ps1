@@ -7,10 +7,16 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
-if (-not (Get-Command $Iverilog -ErrorAction SilentlyContinue)) {
+$iverilogCommand = Get-Command $Iverilog -ErrorAction SilentlyContinue
+if ($iverilogCommand) {
+    $Iverilog = $iverilogCommand.Source
+} else {
     $Iverilog = Join-Path $repoRoot ".deps\iverilog\bin\iverilog.exe"
 }
-if (-not (Get-Command $Vvp -ErrorAction SilentlyContinue)) {
+$vvpCommand = Get-Command $Vvp -ErrorAction SilentlyContinue
+if ($vvpCommand) {
+    $Vvp = $vvpCommand.Source
+} else {
     $Vvp = Join-Path $repoRoot ".deps\iverilog\bin\vvp.exe"
 }
 if (-not (Test-Path -LiteralPath $Iverilog)) {
@@ -51,6 +57,17 @@ try {
         -Sources @(
             "src\fpga_spi_block_bridge.v",
             "sim\tb_fpga_spi_block_bridge.sv"
+        )
+
+    Invoke-VerilogTest -Top "tb_sd_native_block_device_read_batch" `
+        -Output "sim\sd_native_block_device_read_batch.vvp" `
+        -Sources @(
+            "src\sd_native_clock.v",
+            "src\sd_native_command.v",
+            "src\sd_native_data_rx.v",
+            "src\sd_native_data_tx.v",
+            "src\sd_native_block_device.v",
+            "sim\tb_sd_native_block_device_read_batch.sv"
         )
 
     & $Iverilog -g2005-sv -Wall -s sd_native_block_device `

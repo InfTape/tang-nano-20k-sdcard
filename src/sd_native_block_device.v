@@ -20,7 +20,7 @@ module sd_native_block_device (
     input  wire [31:0] request_lba,
     input  wire [3:0]  request_block_count,
 
-    input  wire [8:0]  host_buffer_addr,
+    input  wire [11:0] host_buffer_addr,
     output wire [7:0]  host_buffer_rdata,
     output wire [11:0] write_buffer_addr,
     input  wire [7:0]  write_buffer_data,
@@ -137,21 +137,24 @@ module sd_native_block_device (
         .data_index(tx_data_index)
     );
 
-    reg [7:0] block_buffer [0:511];
-    reg [8:0] rx_buffer_addr;
-    assign host_buffer_rdata = block_buffer[host_buffer_addr];
+    reg [7:0] block_buffer [0:4095];
+    reg [11:0] rx_buffer_addr;
+    reg [7:0] host_buffer_rdata_reg;
+    assign host_buffer_rdata = host_buffer_rdata_reg;
     reg [3:0] active_block_count;
     reg [3:0] active_block_index;
     assign write_buffer_addr = {active_block_index[2:0], tx_data_index};
 
     always @(posedge clk) begin
         if (rst) begin
-            rx_buffer_addr <= 9'd0;
+            rx_buffer_addr <= 12'd0;
+            host_buffer_rdata_reg <= 8'd0;
         end else begin
+            host_buffer_rdata_reg <= block_buffer[host_buffer_addr];
             if (read_request && card_ready && !operation_busy)
-                rx_buffer_addr <= 9'd0;
+                rx_buffer_addr <= 12'd0;
             else if (data_valid && data_rx_enable)
-                rx_buffer_addr <= rx_buffer_addr + 9'd1;
+                rx_buffer_addr <= rx_buffer_addr + 12'd1;
             if (data_valid && data_rx_enable)
                 block_buffer[rx_buffer_addr] <= data_byte;
         end
@@ -395,13 +398,14 @@ module sd_native_block_device (
                     data_rx_enable <= 1'b0;
                     if ((read_request || write_request) &&
                         (request_lba >= capacity_blocks ||
-                         (write_request &&
-                          (request_block_count == 0 ||
-                           request_lba + request_block_count >
-                           capacity_blocks)))) begin
+                         request_block_count == 0 ||
+                         {28'd0, request_block_count} >
+                             capacity_blocks - request_lba)) begin
                         fail(E_RANGE);
                     end else if (read_request) begin
                         active_lba <= request_lba;
+                        active_block_count <= request_block_count;
+                        active_block_index <= 4'd0;
                         operation_busy <= 1'b1;
                         read_ready <= 1'b0;
                         data_rx_enable <= 1'b1;
@@ -421,7 +425,8 @@ module sd_native_block_device (
 
                 S_READ_CMD_START: if (!command_busy) begin
                     command_index <= 6'd17;
-                    command_argument <= card_address(active_lba);
+                    command_argument <= card_address(
+                        active_lba + active_block_index);
                     command_response_kind <= 2'd1;
                     command_start <= 1'b1;
                     operation_timeout <= 32'd0;
@@ -433,11 +438,16 @@ module sd_native_block_device (
                 end
                 S_READ_DATA: begin
                     if (block_done) begin
-                        data_rx_enable <= 1'b0;
-                        operation_busy <= 1'b0;
                         if (block_crc_error)
                             fail(E_READ_DATA);
+                        else if (active_block_index + 4'd1 <
+                                 active_block_count) begin
+                            active_block_index <= active_block_index + 4'd1;
+                            state <= S_READ_CMD_START;
+                        end
                         else begin
+                            data_rx_enable <= 1'b0;
+                            operation_busy <= 1'b0;
                             read_ready <= 1'b1;
                             state <= S_IDLE;
                         end

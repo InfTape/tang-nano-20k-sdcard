@@ -63,7 +63,7 @@ module top (
     wire write_request;
     wire [31:0] request_lba;
     wire [3:0] request_block_count;
-    wire [8:0] buffer_addr;
+    wire [11:0] buffer_addr;
     wire [7:0] buffer_rdata;
     wire [11:0] write_buffer_addr;
     wire [7:0] write_buffer_data;
